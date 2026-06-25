@@ -42,6 +42,8 @@ jobs:
             installable: .#legacyPackages.aarch64-darwin.librewolf
           - name: lmstudio
             installable: .#legacyPackages.aarch64-darwin.lmstudio
+          - name: mise
+            installable: .#legacyPackages.aarch64-darwin.mise
           - name: nh
             installable: .#legacyPackages.aarch64-darwin.nh
           - name: orbstack
