@@ -2,18 +2,28 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended"],
   "timezone": "Asia/Shanghai",
+  "schedule": ["* 8 * * *"],
   "nix": {
     "enabled": true
   },
   "lockFileMaintenance": {
     "enabled": true,
-    "schedule": ["before 5am every day"]
+    "schedule": ["* 8 * * *"],
+    "automerge": true
   },
   "packageRules": [
     {
+      "description": "GitHub Actions：自动更新并合并",
+      "matchManagers": ["github-actions"],
+      "automerge": true,
+      "commitMessageTopic": "github-actions"
+    },
+    {
+      "description": "flake inputs：自动更新并合并",
       "matchManagers": ["nix"],
       "groupName": "nix flake inputs",
-      "commitMessageTopic": "nix flake inputs"
+      "commitMessageTopic": "nix flake inputs",
+      "automerge": true
     }
   ]
 }
