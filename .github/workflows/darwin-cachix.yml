@@ -1,0 +1,79 @@
+name: Darwin Cachix
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "flake.lock"
+      - "flake.nix"
+      - "packages/**"
+      - ".github/workflows/darwin-cachix.yml"
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: darwin-cachix-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NIX_CONFIG: "experimental-features = nix-command flakes\naccept-flake-config = true"
+  NIXPKGS_ALLOW_UNFREE: "1"
+
+jobs:
+  build-darwin:
+    if: ${{ vars.CACHIX_NAME != '' }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include:
+          - name: git-pkgs-forge
+            installable: .#packages.aarch64-darwin.git-pkgs-forge
+          - name: google-chrome
+            installable: .#legacyPackages.aarch64-darwin.google-chrome
+          - name: keka
+            installable: .#legacyPackages.aarch64-darwin.keka
+          - name: librewolf
+            installable: .#legacyPackages.aarch64-darwin.librewolf
+          - name: lmstudio
+            installable: .#legacyPackages.aarch64-darwin.lmstudio
+          - name: mise
+            installable: .#legacyPackages.aarch64-darwin.mise
+          - name: nh
+            installable: .#legacyPackages.aarch64-darwin.nh
+          - name: orbstack
+            installable: .#legacyPackages.aarch64-darwin.orbstack
+          - name: qq
+            installable: .#legacyPackages.aarch64-darwin.qq
+          - name: raycast
+            installable: .#legacyPackages.aarch64-darwin.raycast
+          - name: shottr
+            installable: .#legacyPackages.aarch64-darwin.shottr
+          - name: typora
+            installable: .#legacyPackages.aarch64-darwin.typora
+          - name: winbox
+            installable: .#legacyPackages.aarch64-darwin.winbox
+          - name: zed-editor
+            installable: .#legacyPackages.aarch64-darwin.zed-editor
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v31
+
+      - uses: cachix/cachix-action@v16
+        with:
+          name: ${{ vars.CACHIX_NAME }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Build and push ${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          out_paths="$(nix build --impure --print-out-paths '${{ matrix.installable }}')"
+          if [[ -n "$out_paths" ]]; then
+            cachix push "${{ vars.CACHIX_NAME }}" $out_paths
+          fi
