@@ -71,9 +71,13 @@ jobs:
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
       - name: Build and push ${{ matrix.name }}
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
         run: |
           set -euo pipefail
-          out_paths="$(nix build --impure --print-out-paths '${{ matrix.installable }}')"
-          if [[ -n "$out_paths" ]]; then
-            cachix push "${{ vars.CACHIX_NAME }}" $out_paths
-          fi
+          nix run .#nix-fast-build -- \
+            --flake '${{ matrix.installable }}' \
+            --systems aarch64-darwin \
+            --skip-cached \
+            --no-nom \
+            --cachix-cache "${{ vars.CACHIX_NAME }}"
