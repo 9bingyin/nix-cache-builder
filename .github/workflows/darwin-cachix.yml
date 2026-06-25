@@ -14,6 +14,10 @@ on:
     - cron: "0 6 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+  id-token: write
+
 concurrency:
   group: darwin-cachix-${{ github.ref }}
   cancel-in-progress: false
@@ -147,7 +151,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: cachix/install-nix-action@v31
+      - uses: DeterminateSystems/determinate-nix-action@v3.17.1
+        with:
+          extra-conf: |
+            extra-substituters = https://nix-community.cachix.org https://cache.numtide.com
+            extra-trusted-public-keys = nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs= niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
 
       - uses: cachix/cachix-action@v16
         with:
