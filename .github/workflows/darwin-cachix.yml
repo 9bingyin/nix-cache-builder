@@ -31,34 +31,118 @@ jobs:
       max-parallel: 4
       matrix:
         include:
+          - name: antigravity-cli
+            installable: .#legacyPackages.aarch64-darwin.llm-agents.antigravity-cli
+          - name: btop
+            installable: .#legacyPackages.aarch64-darwin.btop
+          - name: chezmoi
+            installable: .#legacyPackages.aarch64-darwin.chezmoi
+          - name: claude-code
+            installable: .#legacyPackages.aarch64-darwin.llm-agents.claude-code
+          - name: cloc
+            installable: .#legacyPackages.aarch64-darwin.cloc
+          - name: codex
+            installable: .#legacyPackages.aarch64-darwin.llm-agents.codex
+          - name: coreutils
+            installable: .#legacyPackages.aarch64-darwin.coreutils
+          - name: duti
+            installable: .#legacyPackages.aarch64-darwin.duti
+          - name: element-desktop
+            installable: .#legacyPackages.aarch64-darwin.element-desktop
+          - name: entire
+            installable: .#legacyPackages.aarch64-darwin.llm-agents.entire
+          - name: f2
+            installable: .#legacyPackages.aarch64-darwin.f2
+          - name: fastfetch
+            installable: .#legacyPackages.aarch64-darwin.fastfetch
+          - name: ffmpeg
+            installable: .#legacyPackages.aarch64-darwin.ffmpeg
+          - name: gh
+            installable: .#legacyPackages.aarch64-darwin.gh
+          - name: ghostty-bin
+            installable: .#legacyPackages.aarch64-darwin.ghostty-bin
+          - name: git
+            installable: .#legacyPackages.aarch64-darwin.git
+          - name: git-filter-repo
+            installable: .#legacyPackages.aarch64-darwin.git-filter-repo
           - name: git-pkgs-forge
             installable: .#packages.aarch64-darwin.git-pkgs-forge
+          - name: gnupg
+            installable: .#legacyPackages.aarch64-darwin.gnupg
           - name: google-chrome
             installable: .#legacyPackages.aarch64-darwin.google-chrome
+          - name: iina
+            installable: .#legacyPackages.aarch64-darwin.iina
+          - name: jetbrains-mono
+            installable: .#legacyPackages.aarch64-darwin.nerd-fonts.jetbrains-mono
           - name: keka
             installable: .#legacyPackages.aarch64-darwin.keka
+          - name: lazygit
+            installable: .#legacyPackages.aarch64-darwin.lazygit
           - name: librewolf
             installable: .#legacyPackages.aarch64-darwin.librewolf
           - name: lmstudio
             installable: .#legacyPackages.aarch64-darwin.lmstudio
+          - name: localsend
+            installable: .#legacyPackages.aarch64-darwin.localsend
+          - name: macmon
+            installable: .#legacyPackages.aarch64-darwin.macmon
+          - name: mas
+            installable: .#legacyPackages.aarch64-darwin.mas
           - name: mise
             installable: .#legacyPackages.aarch64-darwin.mise
+          - name: mtr
+            installable: .#legacyPackages.aarch64-darwin.mtr
+          - name: nano
+            installable: .#legacyPackages.aarch64-darwin.nano
+          - name: neovim
+            installable: .#legacyPackages.aarch64-darwin.neovim
+          - name: nexttrace
+            installable: .#legacyPackages.aarch64-darwin.nexttrace
           - name: nh
             installable: .#legacyPackages.aarch64-darwin.nh
           - name: orbstack
             installable: .#legacyPackages.aarch64-darwin.orbstack
+          - name: pandoc
+            installable: .#legacyPackages.aarch64-darwin.pandoc
+          - name: picard
+            installable: .#legacyPackages.aarch64-darwin.picard
+          - name: pinentry-mac
+            installable: .#legacyPackages.aarch64-darwin.pinentry_mac
           - name: qq
             installable: .#legacyPackages.aarch64-darwin.qq
           - name: raycast
             installable: .#legacyPackages.aarch64-darwin.raycast
+          - name: ripgrep
+            installable: .#legacyPackages.aarch64-darwin.ripgrep
+          - name: sarasa-gothic
+            installable: .#legacyPackages.aarch64-darwin.sarasa-gothic
           - name: shottr
             installable: .#legacyPackages.aarch64-darwin.shottr
+          - name: sqlitebrowser
+            installable: .#legacyPackages.aarch64-darwin.sqlitebrowser
+          - name: tailscale
+            installable: .#legacyPackages.aarch64-darwin.tailscale
+          - name: tree
+            installable: .#legacyPackages.aarch64-darwin.tree
           - name: typora
             installable: .#legacyPackages.aarch64-darwin.typora
+          - name: vim
+            installable: .#legacyPackages.aarch64-darwin.vim
+          - name: wget
+            installable: .#legacyPackages.aarch64-darwin.wget
           - name: winbox
             installable: .#legacyPackages.aarch64-darwin.winbox
+          - name: xld
+            installable: .#legacyPackages.aarch64-darwin.xld
+          - name: yazi
+            installable: .#legacyPackages.aarch64-darwin.yazi
+          - name: yt-dlp
+            installable: .#legacyPackages.aarch64-darwin.yt-dlp
           - name: zed-editor
             installable: .#legacyPackages.aarch64-darwin.zed-editor
+          - name: zsh
+            installable: .#legacyPackages.aarch64-darwin.zsh
 
     steps:
       - uses: actions/checkout@v4
