@@ -1,3 +1,20 @@
+# Nix
 result
 result-*
 .direnv
+
+# Bun / Node
+node_modules/
+
+# TypeScript
+*.tsbuildinfo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor / IDE (local only)
+.idea/
+*.swp
+*.swo
+*~
