@@ -46,6 +46,8 @@ jobs:
             installable: .#legacyPackages.aarch64-darwin.mise
           - name: nh
             installable: .#legacyPackages.aarch64-darwin.nh
+          - name: nodejs_latest
+            installable: .#legacyPackages.aarch64-darwin.nodejs_latest
           - name: orbstack
             installable: .#legacyPackages.aarch64-darwin.orbstack
           - name: qq
