@@ -154,8 +154,8 @@ jobs:
         with:
           github_access_token: ${{ github.token }}
           extra_nix_config: |
-            extra-substituters = https://nix-community.cachix.org https://cache.numtide.com
-            extra-trusted-public-keys = nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs= niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
+            extra-substituters = https://9bingyin.cachix.org https://nix-community.cachix.org https://cache.numtide.com
+            extra-trusted-public-keys = 9bingyin.cachix.org-1:uXB+kYLEeHo6kpX8NIZtRwwPozYR/JRNRMeFaObkvDo= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs= niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
 
       - uses: cachix/cachix-action@v16
         with:
