@@ -16,7 +16,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 concurrency:
   group: darwin-cachix-${{ github.ref }}
@@ -151,9 +150,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: DeterminateSystems/determinate-nix-action@v3.17.1
+      - uses: samueldr/lix-gha-installer-action@v2026-06-15
         with:
-          extra-conf: |
+          github_access_token: ${{ github.token }}
+          extra_nix_config: |
             extra-substituters = https://nix-community.cachix.org https://cache.numtide.com
             extra-trusted-public-keys = nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs= niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
 
@@ -162,11 +162,19 @@ jobs:
           name: ${{ vars.CACHIX_NAME }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
-      - name: Build and push ${{ matrix.name }}
+      - name: Build missing and push ${{ matrix.name }}
         env:
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
         run: |
           set -euo pipefail
+
+          dry_run_log="$(mktemp)"
+          nix build '${{ matrix.installable }}' --dry-run --no-link 2>&1 | tee "$dry_run_log"
+          if ! grep -q "will be built" "$dry_run_log"; then
+            echo "No missing derivations; skipping build."
+            exit 0
+          fi
+
           nix run .#nix-fast-build -- \
             --flake '${{ matrix.installable }}' \
             --systems aarch64-darwin \
