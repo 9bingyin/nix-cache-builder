@@ -9,11 +9,13 @@ let
 in
 {
   inherit (pkgs)
+    element-desktop
     google-chrome
     keka
     librewolf
     lmstudio
     mise
+    motrix-next
     nh
     nodejs_latest
     orbstack
