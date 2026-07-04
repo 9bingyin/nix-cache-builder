@@ -12,7 +12,7 @@ on:
       - "package.json"
       - "tsconfig.json"
       - "scripts/**"
-      - ".github/workflows/darwin-cachix.yml"
+      - ".github/workflows/host-binary-cache.yml"
   repository_dispatch:
     types:
       - flake-updated
@@ -145,18 +145,12 @@ jobs:
 
       - name: Configure Attic upload
         if: ${{ vars.ATTIC_ENDPOINT != '' && vars.ATTIC_CACHE != '' }}
-        env:
-          ATTIC_ENDPOINT: ${{ vars.ATTIC_ENDPOINT }}
-          ATTIC_CACHE: ${{ vars.ATTIC_CACHE }}
-          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          nix profile install nixpkgs#attic-client
-          echo "$HOME/.nix-profile/bin" >> "$GITHUB_PATH"
-
-          attic login --set-default ci "$ATTIC_ENDPOINT" "$ATTIC_TOKEN"
-          attic use "$ATTIC_CACHE"
+        uses: ryanccn/attic-action@v0
+        with:
+          endpoint: ${{ vars.ATTIC_ENDPOINT }}
+          cache: ${{ vars.ATTIC_CACHE }}
+          token: ${{ secrets.ATTIC_TOKEN }}
+          skip-push: true
 
       - name: Configure Cachix upload
         uses: cachix/cachix-action@v17
