@@ -1,4 +1,4 @@
-name: Darwin Cachix
+name: Darwin Host Cachix
 
 on:
   push:
@@ -6,98 +6,146 @@ on:
       - main
       - master
     paths:
-      - "ci.nix"
       - "flake.lock"
       - "flake.nix"
       - "bun.lock"
       - "package.json"
       - "tsconfig.json"
-      - "packages/**"
       - "scripts/**"
       - ".github/workflows/darwin-cachix.yml"
+  repository_dispatch:
+    types:
+      - flake-updated
   schedule:
     # 每天 04:00 Asia/Shanghai (UTC+8) = 20:00 UTC
     - cron: "0 20 * * *"
   workflow_dispatch:
+    inputs:
+      hosts:
+        description: "逗号分隔的 darwinConfigurations 主机名；留空表示全部"
+        required: false
+        type: string
+      build_only_missing:
+        description: "只构建目标 Cachix 中缺失的主机系统"
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: read
 
 concurrency:
-  group: darwin-cachix-${{ github.ref }}
+  group: darwin-host-cachix-${{ github.ref }}
   cancel-in-progress: false
 
 env:
-  NIX_CONFIG: "experimental-features = nix-command flakes\naccept-flake-config = true"
+  FLAKE_REPOSITORY: 9bingyin/flake
+  FLAKE_CHECKOUT_PATH: flake-config
+  NIX_CONFIG: |
+    experimental-features = nix-command flakes
+    accept-flake-config = true
   NIXPKGS_ALLOW_UNFREE: "1"
 
 jobs:
-  plan-darwin:
+  preprocess:
     if: ${{ vars.CACHIX_NAME != '' }}
     runs-on: ubuntu-latest
     outputs:
-      has_missing: ${{ steps.find.outputs.has_missing }}
-      matrix: ${{ steps.find.outputs.matrix }}
+      has_missing: ${{ steps.plan.outputs.has_missing }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      all_hosts: ${{ steps.plan.outputs.all_hosts }}
 
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout cache builder
+        uses: actions/checkout@v7
 
-      - uses: oven-sh/setup-bun@v2
-
-      - uses: samueldr/lix-gha-installer-action@v2026-06-15
+      - name: Checkout private flake
+        uses: actions/checkout@v7
         with:
-          github_access_token: ${{ github.token }}
+          repository: ${{ env.FLAKE_REPOSITORY }}
+          token: ${{ secrets.FLAKE_REPO_TOKEN }}
+          path: ${{ env.FLAKE_CHECKOUT_PATH }}
+
+      - name: Install Lix for preprocessing
+        uses: samueldr/lix-gha-installer-action@v2026-06-15
+        with:
+          github_access_token: ${{ secrets.FLAKE_REPO_TOKEN }}
           extra_nix_config: |
-            extra-substituters = https://9bingyin.cachix.org https://nix-community.cachix.org https://cache.numtide.com
+            extra-substituters = https://${{ vars.CACHIX_NAME }}.cachix.org https://nix-community.cachix.org https://cache.numtide.com
             extra-trusted-public-keys = 9bingyin.cachix.org-1:uXB+kYLEeHo6kpX8NIZtRwwPozYR/JRNRMeFaObkvDo= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs= niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
 
-      - uses: cachix/cachix-action@v17
-        with:
-          name: ${{ vars.CACHIX_NAME }}
-          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
 
       - name: Typecheck scripts
         run: bun install --frozen-lockfile && bun run typecheck
 
-      - id: find
-        name: Find uncached ci.nix entries
-        run: bun run scripts/find-uncached.ts
+      - id: plan
+        name: Preprocess Darwin host matrix
+        env:
+          CACHIX_NAME: ${{ vars.CACHIX_NAME }}
+          FLAKE_REF: ./${{ env.FLAKE_CHECKOUT_PATH }}
+          HOSTS: ${{ inputs.hosts }}
+          BUILD_ONLY_MISSING: ${{ inputs.build_only_missing }}
+          AARCH64_DARWIN_RUNNER: macos-15
+          X86_64_DARWIN_RUNNER: macos-15-intel
+        run: bun run scripts/preprocess-build-matrix.ts
 
-  build-darwin:
-    needs: plan-darwin
-    if: ${{ needs.plan-darwin.outputs.has_missing == 'true' }}
-    runs-on: macos-latest
+  build:
+    needs: preprocess
+    if: ${{ needs.preprocess.outputs.has_missing == 'true' }}
     strategy:
       fail-fast: false
       max-parallel: 4
-      matrix: ${{ fromJSON(needs.plan-darwin.outputs.matrix) }}
+      matrix: ${{ fromJSON(needs.preprocess.outputs.matrix) }}
+    name: Build ${{ matrix.host }} (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
 
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout cache builder
+        uses: actions/checkout@v7
 
-      - uses: samueldr/lix-gha-installer-action@v2026-06-15
+      - name: Checkout private flake
+        uses: actions/checkout@v7
         with:
-          github_access_token: ${{ github.token }}
+          repository: ${{ env.FLAKE_REPOSITORY }}
+          token: ${{ secrets.FLAKE_REPO_TOKEN }}
+          path: ${{ env.FLAKE_CHECKOUT_PATH }}
+
+      - name: Install native Lix
+        uses: samueldr/lix-gha-installer-action@v2026-06-15
+        with:
+          github_access_token: ${{ secrets.FLAKE_REPO_TOKEN }}
           extra_nix_config: |
-            extra-substituters = https://9bingyin.cachix.org https://nix-community.cachix.org https://cache.numtide.com
+            extra-substituters = https://${{ vars.CACHIX_NAME }}.cachix.org https://nix-community.cachix.org https://cache.numtide.com
             extra-trusted-public-keys = 9bingyin.cachix.org-1:uXB+kYLEeHo6kpX8NIZtRwwPozYR/JRNRMeFaObkvDo= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs= niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
 
-      - uses: cachix/cachix-action@v17
+      - name: Verify native Lix system
+        run: |
+          set -euo pipefail
+          actual_system="$(nix eval --raw --impure --expr builtins.currentSystem)"
+          expected_system='${{ matrix.lixSystem }}'
+          echo "actual_system=${actual_system}"
+          echo "expected_system=${expected_system}"
+          test "${actual_system}" = "${expected_system}"
+
+      - name: Configure Cachix upload
+        uses: cachix/cachix-action@v17
         with:
           name: ${{ vars.CACHIX_NAME }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
-      - name: Build and push ${{ matrix.name }}
+      - name: Build and push ${{ matrix.host }}
         env:
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
         run: |
           set -euo pipefail
 
+          flake_attr='${{ matrix.flakeAttr }}'
+
           nix run .#nix-fast-build -- \
-            --file ci.nix \
-            -A '${{ matrix.attr }}' \
-            --pure \
-            --systems aarch64-darwin \
+            --flake "./${FLAKE_CHECKOUT_PATH}#${flake_attr}" \
+            --systems '${{ matrix.system }}' \
             --skip-cached \
             --no-nom \
             --no-link \
