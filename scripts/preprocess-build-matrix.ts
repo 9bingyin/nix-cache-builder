@@ -314,12 +314,33 @@ function isCached(storePath: string): boolean {
   ]);
   const parsed: unknown = JSON.parse(result.stdout);
 
-  if (!Array.isArray(parsed) || parsed.length !== 1) {
-    throw new Error(`Unexpected cache query result for ${storePath}: ${result.stdout}`);
+  if (Array.isArray(parsed)) {
+    if (parsed.length !== 1) {
+      throw new Error(`Unexpected cache query result for ${storePath}: ${result.stdout}`);
+    }
+
+    const [pathInfo] = parsed as CachePathInfo[];
+    return pathInfo?.valid === true;
   }
 
-  const [pathInfo] = parsed as CachePathInfo[];
-  return pathInfo?.valid === true;
+  if (parsed !== null && typeof parsed === "object") {
+    if (!Object.hasOwn(parsed, storePath)) {
+      throw new Error(`Unexpected cache query result for ${storePath}: ${result.stdout}`);
+    }
+
+    const pathInfo = (parsed as Record<string, unknown>)[storePath];
+    if (pathInfo === null) {
+      return false;
+    }
+
+    if (typeof pathInfo === "object" && pathInfo !== null && "valid" in pathInfo) {
+      return (pathInfo as CachePathInfo).valid === true;
+    }
+
+    return true;
+  }
+
+  throw new Error(`Unexpected cache query result for ${storePath}: ${result.stdout}`);
 }
 
 function deduplicateBuildEntries(entries: MatrixEntry[]): MatrixEntry[] {
