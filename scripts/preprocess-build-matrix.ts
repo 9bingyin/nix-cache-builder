@@ -5,7 +5,10 @@ import { appendFileSync } from "node:fs";
 const textDecoder = new TextDecoder();
 
 const flakeRef = Bun.env.FLAKE_REF ?? "./flake-config";
-const flakeAttrRoot = Bun.env.FLAKE_ATTR_ROOT ?? "darwinConfigurations";
+const configRoots = (Bun.env.CONFIG_ROOTS ?? Bun.env.FLAKE_ATTR_ROOT ?? "darwinConfigurations,nixosConfigurations")
+  .split(",")
+  .map((root) => root.trim())
+  .filter((root) => root.length > 0);
 const cachixName = Bun.env.CACHIX_NAME;
 const cacheUrl =
   Bun.env.NIX_BINARY_CACHE_URL ??
@@ -26,15 +29,24 @@ const runnerOverrides = parseRunnerOverrides(Bun.env.HOST_RUNNER_OVERRIDES);
 const systemDefaults = {
   "aarch64-darwin": {
     runner: Bun.env.AARCH64_DARWIN_RUNNER ?? "macos-15",
-    lixSystem: "aarch64-darwin",
+    currentSystem: "aarch64-darwin",
   },
   "x86_64-darwin": {
     runner: Bun.env.X86_64_DARWIN_RUNNER ?? "macos-15-intel",
-    lixSystem: "x86_64-darwin",
+    currentSystem: "x86_64-darwin",
+  },
+  "x86_64-linux": {
+    runner: Bun.env.X86_64_LINUX_RUNNER ?? "ubuntu-24.04",
+    currentSystem: "x86_64-linux",
+  },
+  "aarch64-linux": {
+    runner: Bun.env.AARCH64_LINUX_RUNNER ?? "ubuntu-24.04-arm",
+    currentSystem: "aarch64-linux",
   },
 } as const;
 
 type SupportedSystem = keyof typeof systemDefaults;
+type Installer = "lix" | "nix";
 
 type CommandResult = {
   stdout: string;
@@ -43,9 +55,11 @@ type CommandResult = {
 };
 
 type HostInfo = {
+  root: string;
   hostName: string;
   hostSystem: string;
   storePath: string;
+  nixPackageName: string;
 };
 
 type CachePathInfo = {
@@ -55,11 +69,14 @@ type CachePathInfo = {
 
 type MatrixEntry = {
   host: string;
+  root: string;
   system: SupportedSystem;
   runner: string;
-  lixSystem: string;
+  installer: Installer;
+  expectedSystem: string;
   flakeAttr: string;
   storePath: string;
+  nixPackageName: string;
   cached: boolean;
 };
 
@@ -131,11 +148,25 @@ function nixAttrSegment(name: string): string {
     : JSON.stringify(name);
 }
 
-function flakeAttrForHost(host: string): string {
-  return `${flakeAttrRoot}.${nixAttrSegment(host)}.system`;
+function flakeAttrForHost(root: string, host: string): string {
+  const configAttr = `${root}.${nixAttrSegment(host)}`;
+
+  if (root === "darwinConfigurations") {
+    return `${configAttr}.system`;
+  }
+
+  if (root === "nixosConfigurations") {
+    return `${configAttr}.config.system.build.toplevel`;
+  }
+
+  throw new Error(`Unsupported config root for build attr: ${root}`);
 }
 
-function getHosts(): HostInfo[] {
+function installerFromNixPackage(nixPackageName: string): Installer {
+  return nixPackageName.toLowerCase().includes("lix") ? "lix" : "nix";
+}
+
+function getHostsForRoot(root: string): HostInfo[] {
   const expression = String.raw`
 let
   getSystem = cfg:
@@ -152,26 +183,55 @@ let
       else
         throw "Cannot infer nixpkgs.hostPlatform.system"
     else
-      throw "Cannot infer darwin configuration system";
+      throw "Cannot infer host system";
+
+  getStorePath = cfg:
+    if cfg ? system then
+      cfg.system.outPath
+    else if cfg ? config && cfg.config ? system && cfg.config.system ? build && cfg.config.system.build ? toplevel then
+      cfg.config.system.build.toplevel.outPath
+    else
+      throw "Cannot infer system build output";
+
+  getNixPackageName = cfg:
+    if cfg ? config && cfg.config ? nix && cfg.config.nix ? package then
+      let
+        pkg = cfg.config.nix.package;
+      in
+      if builtins.isAttrs pkg && pkg ? pname then
+        pkg.pname
+      else if builtins.isAttrs pkg && pkg ? name then
+        pkg.name
+      else
+        "nix"
+    else
+      "nix";
 in
 configs: builtins.mapAttrs (hostName: cfg: {
   hostName = hostName;
   hostSystem = getSystem cfg;
-  storePath = cfg.system.outPath;
+  storePath = getStorePath cfg;
+  nixPackageName = getNixPackageName cfg;
 }) configs
 `;
 
-  const result = runRequired("nix", [
+  const result = run("nix", [
     "eval",
     "--json",
-    `${flakeRef}#${flakeAttrRoot}`,
+    `${flakeRef}#${root}`,
     "--apply",
     expression,
   ]);
 
+  if (result.exitCode !== 0) {
+    console.warn(`Skipping ${flakeRef}#${root}: evaluation failed or attribute is absent`);
+    console.warn(result.stderr.trim());
+    return [];
+  }
+
   const parsed: unknown = JSON.parse(result.stdout);
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error(`Unexpected ${flakeAttrRoot} evaluation result: ${result.stdout}`);
+    throw new Error(`Unexpected ${root} evaluation result: ${result.stdout}`);
   }
 
   return Object.values(parsed).map((value) => {
@@ -181,13 +241,21 @@ configs: builtins.mapAttrs (hostName: cfg: {
       Array.isArray(value) ||
       typeof (value as HostInfo).hostName !== "string" ||
       typeof (value as HostInfo).hostSystem !== "string" ||
-      typeof (value as HostInfo).storePath !== "string"
+      typeof (value as HostInfo).storePath !== "string" ||
+      typeof (value as HostInfo).nixPackageName !== "string"
     ) {
       throw new Error(`Unexpected host metadata: ${JSON.stringify(value)}`);
     }
 
-    return value as HostInfo;
+    return {
+      ...(value as Omit<HostInfo, "root">),
+      root,
+    };
   });
+}
+
+function getHosts(): HostInfo[] {
+  return configRoots.flatMap((root) => getHostsForRoot(root));
 }
 
 function isCached(storePath: string): boolean {
@@ -218,7 +286,7 @@ function deduplicateBuildEntries(entries: MatrixEntry[]): MatrixEntry[] {
   return entries.filter((entry) => {
     const key = `${entry.system}:${entry.storePath}`;
     if (seen.has(key)) {
-      console.log(`${entry.host}: duplicate store path, skipped from build matrix`);
+      console.log(`${entry.root}.${entry.host}: duplicate store path, skipped from build matrix`);
       return false;
     }
 
@@ -230,12 +298,12 @@ function deduplicateBuildEntries(entries: MatrixEntry[]): MatrixEntry[] {
 function buildPlan(): PlanOutput {
   const allHosts = getHosts()
     .filter((host) => hostFilters.size === 0 || hostFilters.has(host.hostName))
-    .sort((left, right) => left.hostName.localeCompare(right.hostName));
+    .sort((left, right) => `${left.root}.${left.hostName}`.localeCompare(`${right.root}.${right.hostName}`));
 
   if (allHosts.length === 0) {
     throw new Error(
       hostFilters.size === 0
-        ? `No hosts found under ${flakeRef}#${flakeAttrRoot}`
+        ? `No hosts found under ${flakeRef}#${configRoots.join(",")}`
         : `No hosts matched HOSTS=${Array.from(hostFilters).join(",")}`,
     );
   }
@@ -243,7 +311,7 @@ function buildPlan(): PlanOutput {
   const entries = allHosts.map((host): MatrixEntry => {
     if (!isSupportedSystem(host.hostSystem)) {
       throw new Error(
-        `Unsupported host system for ${host.hostName}: ${host.hostSystem}. Supported: ${Object.keys(
+        `Unsupported host system for ${host.root}.${host.hostName}: ${host.hostSystem}. Supported: ${Object.keys(
           systemDefaults,
         ).join(", ")}`,
       );
@@ -251,18 +319,22 @@ function buildPlan(): PlanOutput {
 
     const defaults = systemDefaults[host.hostSystem];
     const cached = isCached(host.storePath);
+    const installer = installerFromNixPackage(host.nixPackageName);
 
     console.log(
-      `${host.hostName}: ${host.hostSystem} ${cached ? "cached" : "missing"} ${host.storePath}`,
+      `${host.root}.${host.hostName}: ${host.hostSystem} ${installer} ${cached ? "cached" : "missing"} ${host.storePath}`,
     );
 
     return {
       host: host.hostName,
+      root: host.root,
       system: host.hostSystem,
-      runner: runnerOverrides[host.hostName] ?? defaults.runner,
-      lixSystem: defaults.lixSystem,
-      flakeAttr: flakeAttrForHost(host.hostName),
+      runner: runnerOverrides[`${host.root}.${host.hostName}`] ?? runnerOverrides[host.hostName] ?? defaults.runner,
+      installer,
+      expectedSystem: defaults.currentSystem,
+      flakeAttr: flakeAttrForHost(host.root, host.hostName),
       storePath: host.storePath,
+      nixPackageName: host.nixPackageName,
       cached,
     };
   });
@@ -297,20 +369,21 @@ function writeGithubSummary(plan: PlanOutput): void {
   const rows = plan.allHosts.include
     .map(
       (entry) =>
-        `| ${entry.host} | ${entry.system} | ${entry.runner} | ${entry.cached ? "cached" : "missing"} | ${entry.storePath} |`,
+        `| ${entry.root}.${entry.host} | ${entry.system} | ${entry.runner} | ${entry.installer} | ${entry.nixPackageName} | ${entry.cached ? "cached" : "missing"} | ${entry.storePath} |`,
     )
     .join("\n");
 
   appendFileSync(
     summaryPath,
     [
-      "## Darwin host cache plan",
+      "## Host cache plan",
       "",
-      `Flake: \`${flakeRef}#${flakeAttrRoot}\``,
+      `Flake: \`${flakeRef}\``,
+      `Roots: \`${configRoots.join(",")}\``,
       `Cache: \`${cacheUrl ?? "none"}\``,
       "",
-      "| Host | System | Runner | Cache | Store path |",
-      "| --- | --- | --- | --- | --- |",
+      "| Host | System | Runner | Installer | nix.package | Cache | Store path |",
+      "| --- | --- | --- | --- | --- | --- | --- |",
       rows,
       "",
     ].join("\n"),

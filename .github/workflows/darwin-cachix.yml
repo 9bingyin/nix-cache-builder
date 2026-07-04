@@ -1,4 +1,4 @@
-name: Darwin Host Cachix
+name: Host Cachix
 
 on:
   push:
@@ -22,7 +22,7 @@ on:
   workflow_dispatch:
     inputs:
       hosts:
-        description: "逗号分隔的 darwinConfigurations 主机名；留空表示全部"
+        description: "逗号分隔的 configurations 主机名；留空表示全部"
         required: false
         type: string
       build_only_missing:
@@ -35,7 +35,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: darwin-host-cachix-${{ github.ref }}
+  group: host-cachix-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -81,14 +81,17 @@ jobs:
         run: bun install --frozen-lockfile && bun run typecheck
 
       - id: plan
-        name: Preprocess Darwin host matrix
+        name: Preprocess host matrix
         env:
           CACHIX_NAME: ${{ vars.CACHIX_NAME }}
           FLAKE_REF: ./${{ env.FLAKE_CHECKOUT_PATH }}
+          CONFIG_ROOTS: darwinConfigurations,nixosConfigurations
           HOSTS: ${{ inputs.hosts }}
           BUILD_ONLY_MISSING: ${{ inputs.build_only_missing }}
-          AARCH64_DARWIN_RUNNER: macos-15
-          X86_64_DARWIN_RUNNER: macos-15-intel
+          AARCH64_DARWIN_RUNNER: ${{ vars.AARCH64_DARWIN_RUNNER || 'macos-15' }}
+          X86_64_DARWIN_RUNNER: ${{ vars.X86_64_DARWIN_RUNNER || 'macos-15-intel' }}
+          X86_64_LINUX_RUNNER: ${{ vars.X86_64_LINUX_RUNNER || 'ubuntu-24.04' }}
+          AARCH64_LINUX_RUNNER: ${{ vars.AARCH64_LINUX_RUNNER || 'ubuntu-24.04-arm' }}
         run: bun run scripts/preprocess-build-matrix.ts
 
   build:
@@ -98,7 +101,7 @@ jobs:
       fail-fast: false
       max-parallel: 4
       matrix: ${{ fromJSON(needs.preprocess.outputs.matrix) }}
-    name: Build ${{ matrix.host }} (${{ matrix.system }})
+    name: Build ${{ matrix.root }}.${{ matrix.host }} (${{ matrix.system }}, ${{ matrix.installer }})
     runs-on: ${{ matrix.runner }}
 
     steps:
@@ -113,6 +116,7 @@ jobs:
           path: ${{ env.FLAKE_CHECKOUT_PATH }}
 
       - name: Install native Lix
+        if: ${{ matrix.installer == 'lix' }}
         uses: samueldr/lix-gha-installer-action@v2026-06-15
         with:
           github_access_token: ${{ secrets.FLAKE_REPO_TOKEN }}
@@ -120,13 +124,26 @@ jobs:
             extra-substituters = https://${{ vars.CACHIX_NAME }}.cachix.org https://nix-community.cachix.org https://cache.numtide.com
             extra-trusted-public-keys = 9bingyin.cachix.org-1:uXB+kYLEeHo6kpX8NIZtRwwPozYR/JRNRMeFaObkvDo= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs= niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
 
-      - name: Verify native Lix system
+      - name: Install native Nix
+        if: ${{ matrix.installer == 'nix' }}
+        uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.FLAKE_REPO_TOKEN }}
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            extra-substituters = https://${{ vars.CACHIX_NAME }}.cachix.org https://nix-community.cachix.org https://cache.numtide.com
+            extra-trusted-public-keys = 9bingyin.cachix.org-1:uXB+kYLEeHo6kpX8NIZtRwwPozYR/JRNRMeFaObkvDo= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs= niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
+
+      - name: Verify native Nix system
         run: |
           set -euo pipefail
           actual_system="$(nix eval --raw --impure --expr builtins.currentSystem)"
-          expected_system='${{ matrix.lixSystem }}'
+          expected_system='${{ matrix.expectedSystem }}'
           echo "actual_system=${actual_system}"
           echo "expected_system=${expected_system}"
+          echo "installer=${{ matrix.installer }}"
+          echo "nix_package=${{ matrix.nixPackageName }}"
           test "${actual_system}" = "${expected_system}"
 
       - name: Configure Cachix upload
@@ -135,7 +152,7 @@ jobs:
           name: ${{ vars.CACHIX_NAME }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
-      - name: Build and push ${{ matrix.host }}
+      - name: Build and push ${{ matrix.root }}.${{ matrix.host }}
         env:
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
         run: |
