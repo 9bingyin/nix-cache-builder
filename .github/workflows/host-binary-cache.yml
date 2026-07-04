@@ -120,8 +120,8 @@ jobs:
         with:
           github_access_token: ${{ secrets.FLAKE_REPO_TOKEN }}
           lix_conf: |
-            extra-substituters = https://${{ vars.CACHIX_NAME }}.cachix.org https://nix-community.cachix.org https://cache.numtide.com ${{ matrix.extraSubstituters }}
-            extra-trusted-public-keys = 9bingyin.cachix.org-1:uXB+kYLEeHo6kpX8NIZtRwwPozYR/JRNRMeFaObkvDo= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs= niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g= ${{ matrix.extraTrustedPublicKeys }}
+            extra-substituters = ${{ matrix.extraSubstituters }}
+            extra-trusted-public-keys = ${{ matrix.extraTrustedPublicKeys }}
 
       - name: Install native Nix
         if: ${{ matrix.installer == 'nix' }}
@@ -131,8 +131,8 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
             accept-flake-config = true
-            extra-substituters = https://${{ vars.CACHIX_NAME }}.cachix.org https://nix-community.cachix.org https://cache.numtide.com ${{ matrix.extraSubstituters }}
-            extra-trusted-public-keys = 9bingyin.cachix.org-1:uXB+kYLEeHo6kpX8NIZtRwwPozYR/JRNRMeFaObkvDo= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs= niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g= ${{ matrix.extraTrustedPublicKeys }}
+            extra-substituters = ${{ matrix.extraSubstituters }}
+            extra-trusted-public-keys = ${{ matrix.extraTrustedPublicKeys }}
 
       - name: Verify native Nix system
         run: |
@@ -177,6 +177,8 @@ jobs:
           set -euo pipefail
 
           flake_attr='${{ matrix.flakeAttr }}'
+          substituters='${{ matrix.extraSubstituters }}'
+          trusted_public_keys='${{ matrix.extraTrustedPublicKeys }}'
           args=(
             --flake "./${FLAKE_CHECKOUT_PATH}#${flake_attr}"
             --systems '${{ matrix.system }}'
@@ -185,6 +187,14 @@ jobs:
             --no-link
             --cachix-cache "${{ vars.CACHIX_NAME }}"
           )
+
+          if [[ -n "${substituters}" ]]; then
+            args+=(--option substituters "${substituters}")
+          fi
+
+          if [[ -n "${trusted_public_keys}" ]]; then
+            args+=(--option trusted-public-keys "${trusted_public_keys}")
+          fi
 
           if [[ -n "${ATTIC_CACHE}" ]]; then
             args+=(--attic-cache "${ATTIC_CACHE}")

@@ -5,7 +5,11 @@ import { appendFileSync } from "node:fs";
 const textDecoder = new TextDecoder();
 
 const flakeRef = Bun.env.FLAKE_REF ?? "./flake-config";
-const configRoots = (Bun.env.CONFIG_ROOTS ?? Bun.env.FLAKE_ATTR_ROOT ?? "darwinConfigurations,nixosConfigurations")
+const configRoots = (
+  Bun.env.CONFIG_ROOTS ??
+  Bun.env.FLAKE_ATTR_ROOT ??
+  "darwinConfigurations,nixosConfigurations"
+)
   .split(",")
   .map((root) => root.trim())
   .filter((root) => root.length > 0);
@@ -97,7 +101,9 @@ type PlanOutput = {
   allHosts: MatrixOutput;
 };
 
-function parseRunnerOverrides(value: string | undefined): Record<string, string> {
+function parseRunnerOverrides(
+  value: string | undefined,
+): Record<string, string> {
   if (value === undefined || value.trim().length === 0) {
     return {};
   }
@@ -109,7 +115,9 @@ function parseRunnerOverrides(value: string | undefined): Record<string, string>
     Array.isArray(parsed) ||
     !Object.values(parsed).every((runner) => typeof runner === "string")
   ) {
-    throw new Error("HOST_RUNNER_OVERRIDES must be a JSON object of host to runner label");
+    throw new Error(
+      "HOST_RUNNER_OVERRIDES must be a JSON object of host to runner label",
+    );
   }
 
   return parsed as Record<string, string>;
@@ -143,16 +151,18 @@ function runRequired(command: string, args: readonly string[]): CommandResult {
   }
 
   throw new Error(
-    [`Command failed: ${[command, ...args].join(" ")}`, result.stdout, result.stderr]
+    [
+      `Command failed: ${[command, ...args].join(" ")}`,
+      result.stdout,
+      result.stderr,
+    ]
       .filter((line) => line.length > 0)
       .join("\n"),
   );
 }
 
 function nixAttrSegment(name: string): string {
-  return /^[A-Za-z_][A-Za-z0-9_'-]*$/.test(name)
-    ? name
-    : JSON.stringify(name);
+  return /^[A-Za-z_][A-Za-z0-9_'-]*$/.test(name) ? name : JSON.stringify(name);
 }
 
 function flakeAttrForHost(root: string, host: string): string {
@@ -264,7 +274,9 @@ configs: builtins.mapAttrs (hostName: cfg: {
   ]);
 
   if (result.exitCode !== 0) {
-    console.warn(`Skipping ${flakeRef}#${root}: evaluation failed or attribute is absent`);
+    console.warn(
+      `Skipping ${flakeRef}#${root}: evaluation failed or attribute is absent`,
+    );
     console.warn(result.stderr.trim());
     return [];
   }
@@ -316,7 +328,9 @@ function isCached(storePath: string): boolean {
 
   if (Array.isArray(parsed)) {
     if (parsed.length !== 1) {
-      throw new Error(`Unexpected cache query result for ${storePath}: ${result.stdout}`);
+      throw new Error(
+        `Unexpected cache query result for ${storePath}: ${result.stdout}`,
+      );
     }
 
     const [pathInfo] = parsed as CachePathInfo[];
@@ -325,7 +339,9 @@ function isCached(storePath: string): boolean {
 
   if (parsed !== null && typeof parsed === "object") {
     if (!Object.hasOwn(parsed, storePath)) {
-      throw new Error(`Unexpected cache query result for ${storePath}: ${result.stdout}`);
+      throw new Error(
+        `Unexpected cache query result for ${storePath}: ${result.stdout}`,
+      );
     }
 
     const pathInfo = (parsed as Record<string, unknown>)[storePath];
@@ -333,14 +349,20 @@ function isCached(storePath: string): boolean {
       return false;
     }
 
-    if (typeof pathInfo === "object" && pathInfo !== null && "valid" in pathInfo) {
+    if (
+      typeof pathInfo === "object" &&
+      pathInfo !== null &&
+      "valid" in pathInfo
+    ) {
       return (pathInfo as CachePathInfo).valid === true;
     }
 
     return true;
   }
 
-  throw new Error(`Unexpected cache query result for ${storePath}: ${result.stdout}`);
+  throw new Error(
+    `Unexpected cache query result for ${storePath}: ${result.stdout}`,
+  );
 }
 
 function deduplicateBuildEntries(entries: MatrixEntry[]): MatrixEntry[] {
@@ -349,7 +371,9 @@ function deduplicateBuildEntries(entries: MatrixEntry[]): MatrixEntry[] {
   return entries.filter((entry) => {
     const key = `${entry.system}:${entry.storePath}`;
     if (seen.has(key)) {
-      console.log(`${entry.root}.${entry.host}: duplicate store path, skipped from build matrix`);
+      console.log(
+        `${entry.root}.${entry.host}: duplicate store path, skipped from build matrix`,
+      );
       return false;
     }
 
@@ -361,7 +385,11 @@ function deduplicateBuildEntries(entries: MatrixEntry[]): MatrixEntry[] {
 function buildPlan(): PlanOutput {
   const allHosts = getHosts()
     .filter((host) => hostFilters.size === 0 || hostFilters.has(host.hostName))
-    .sort((left, right) => `${left.root}.${left.hostName}`.localeCompare(`${right.root}.${right.hostName}`));
+    .sort((left, right) =>
+      `${left.root}.${left.hostName}`.localeCompare(
+        `${right.root}.${right.hostName}`,
+      ),
+    );
 
   if (allHosts.length === 0) {
     throw new Error(
@@ -397,7 +425,10 @@ function buildPlan(): PlanOutput {
       host: host.hostName,
       root: host.root,
       system: host.hostSystem,
-      runner: runnerOverrides[`${host.root}.${host.hostName}`] ?? runnerOverrides[host.hostName] ?? defaults.runner,
+      runner:
+        runnerOverrides[`${host.root}.${host.hostName}`] ??
+        runnerOverrides[host.hostName] ??
+        defaults.runner,
       installer,
       expectedSystem: defaults.currentSystem,
       flakeAttr: flakeAttrForHost(host.root, host.hostName),
