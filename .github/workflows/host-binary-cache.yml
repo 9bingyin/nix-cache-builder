@@ -145,12 +145,18 @@ jobs:
 
       - name: Configure Attic upload
         if: ${{ vars.ATTIC_ENDPOINT != '' && vars.ATTIC_CACHE != '' }}
-        uses: ryanccn/attic-action@v0
-        with:
-          endpoint: ${{ vars.ATTIC_ENDPOINT }}
-          cache: ${{ vars.ATTIC_CACHE }}
-          token: ${{ secrets.ATTIC_TOKEN }}
-          skip-push: true
+        env:
+          ATTIC_ENDPOINT: ${{ vars.ATTIC_ENDPOINT }}
+          ATTIC_CACHE: ${{ vars.ATTIC_CACHE }}
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          nix profile install nixpkgs#attic-client
+          export PATH="$HOME/.nix-profile/bin:$PATH"
+
+          attic login --set-default ci "$ATTIC_ENDPOINT" "$ATTIC_TOKEN"
+          attic use "$ATTIC_CACHE"
 
       - name: Configure Cachix upload
         uses: cachix/cachix-action@v17
