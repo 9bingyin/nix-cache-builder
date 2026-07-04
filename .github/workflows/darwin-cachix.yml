@@ -1,4 +1,4 @@
-name: Host Cachix
+name: Host Binary Cache
 
 on:
   push:
@@ -143,6 +143,21 @@ jobs:
           echo "nix_package=${{ matrix.nixPackageName }}"
           test "${actual_system}" = "${expected_system}"
 
+      - name: Configure Attic upload
+        if: ${{ vars.ATTIC_ENDPOINT != '' && vars.ATTIC_CACHE != '' }}
+        env:
+          ATTIC_ENDPOINT: ${{ vars.ATTIC_ENDPOINT }}
+          ATTIC_CACHE: ${{ vars.ATTIC_CACHE }}
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          nix profile install nixpkgs#attic-client
+          echo "$HOME/.nix-profile/bin" >> "$GITHUB_PATH"
+
+          attic login --set-default ci "$ATTIC_ENDPOINT" "$ATTIC_TOKEN"
+          attic use "$ATTIC_CACHE"
+
       - name: Configure Cachix upload
         uses: cachix/cachix-action@v17
         with:
@@ -152,15 +167,32 @@ jobs:
       - name: Build and push ${{ matrix.root }}.${{ matrix.host }}
         env:
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          ATTIC_CACHE: ${{ vars.ATTIC_CACHE }}
+          ATTIC_PUSH_BUILD_CLOSURE: ${{ vars.ATTIC_PUSH_BUILD_CLOSURE }}
+          ATTIC_IGNORE_UPSTREAM_CACHE_FILTER: ${{ vars.ATTIC_IGNORE_UPSTREAM_CACHE_FILTER }}
         run: |
           set -euo pipefail
 
           flake_attr='${{ matrix.flakeAttr }}'
-
-          nix run .#nix-fast-build -- \
-            --flake "./${FLAKE_CHECKOUT_PATH}#${flake_attr}" \
-            --systems '${{ matrix.system }}' \
-            --skip-cached \
-            --no-nom \
-            --no-link \
+          args=(
+            --flake "./${FLAKE_CHECKOUT_PATH}#${flake_attr}"
+            --systems '${{ matrix.system }}'
+            --skip-cached
+            --no-nom
+            --no-link
             --cachix-cache "${{ vars.CACHIX_NAME }}"
+          )
+
+          if [[ -n "${ATTIC_CACHE}" ]]; then
+            args+=(--attic-cache "${ATTIC_CACHE}")
+          fi
+
+          if [[ "${ATTIC_PUSH_BUILD_CLOSURE}" == "true" ]]; then
+            args+=(--attic-push-build-closure)
+          fi
+
+          if [[ "${ATTIC_IGNORE_UPSTREAM_CACHE_FILTER}" == "true" ]]; then
+            args+=(--attic-ignore-upstream-cache-filter)
+          fi
+
+          nix run .#nix-fast-build -- "${args[@]}"
