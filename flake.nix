@@ -3,7 +3,6 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-    llm-agents.url = "github:numtide/llm-agents.nix";
     treefmt-nix = {
       url = "github:numtide/treefmt-nix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -14,7 +13,6 @@
     {
       self,
       nixpkgs,
-      llm-agents,
       treefmt-nix,
       ...
     }:
@@ -32,7 +30,6 @@
         system:
         import nixpkgs {
           inherit system;
-          overlays = [ llm-agents.overlays.default ];
           config.allowUnfree = true;
         };
 
@@ -44,10 +41,6 @@
           programs.prettier.enable = true;
         }
       );
-
-      packagesFor = pkgs: {
-        git-pkgs-forge = pkgs.callPackage ./packages/git-pkgs-forge.nix { };
-      };
     in
     {
       formatter = nixpkgs.lib.genAttrs systems (system: treefmtEval.${system}.config.build.wrapper);
@@ -64,8 +57,6 @@
       });
 
       legacyPackages = forAllSystems (pkgs: pkgs);
-
-      packages = forAllSystems packagesFor;
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {

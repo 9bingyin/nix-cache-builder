@@ -16,6 +16,9 @@ const cacheUrl =
     ? undefined
     : `https://${cachixName}.cachix.org`);
 const buildOnlyMissing = (Bun.env.BUILD_ONLY_MISSING ?? "true") !== "false";
+const excludedSubstituters = new Set([
+  "https://mirrors.ustc.edu.cn/nix-channels/store",
+]);
 
 const hostFilters = new Set(
   (Bun.env.HOSTS ?? "")
@@ -60,6 +63,8 @@ type HostInfo = {
   hostSystem: string;
   storePath: string;
   nixPackageName: string;
+  substituters: string[];
+  trustedPublicKeys: string[];
 };
 
 type CachePathInfo = {
@@ -77,6 +82,8 @@ type MatrixEntry = {
   flakeAttr: string;
   storePath: string;
   nixPackageName: string;
+  extraSubstituters: string;
+  extraTrustedPublicKeys: string;
   cached: boolean;
 };
 
@@ -166,6 +173,28 @@ function installerFromNixPackage(nixPackageName: string): Installer {
   return nixPackageName.toLowerCase().includes("lix") ? "lix" : "nix";
 }
 
+function isStringArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.every((item): item is string => typeof item === "string")
+  );
+}
+
+function unique(items: readonly string[]): string[] {
+  return Array.from(new Set(items.filter((item) => item.length > 0)));
+}
+
+function filterSubstituters(substituters: readonly string[]): string[] {
+  return unique(substituters).filter((substituter) => {
+    if (excludedSubstituters.has(substituter)) {
+      console.log(`excluded substituter: ${substituter}`);
+      return false;
+    }
+
+    return true;
+  });
+}
+
 function getHostsForRoot(root: string): HostInfo[] {
   const expression = String.raw`
 let
@@ -206,13 +235,24 @@ let
         "nix"
     else
       "nix";
+
+  getNixSetting = cfg: name:
+    if cfg ? config && cfg.config ? nix && cfg.config.nix ? settings && builtins.hasAttr name cfg.config.nix.settings then
+      builtins.getAttr name cfg.config.nix.settings
+    else
+      [];
+
+  getHostCacheSettings = cfg: {
+    substituters = getNixSetting cfg "substituters" ++ getNixSetting cfg "extra-substituters";
+    trustedPublicKeys = getNixSetting cfg "trusted-public-keys" ++ getNixSetting cfg "extra-trusted-public-keys";
+  };
 in
 configs: builtins.mapAttrs (hostName: cfg: {
   hostName = hostName;
   hostSystem = getSystem cfg;
   storePath = getStorePath cfg;
   nixPackageName = getNixPackageName cfg;
-}) configs
+} // getHostCacheSettings cfg) configs
 `;
 
   const result = run("nix", [
@@ -242,7 +282,9 @@ configs: builtins.mapAttrs (hostName: cfg: {
       typeof (value as HostInfo).hostName !== "string" ||
       typeof (value as HostInfo).hostSystem !== "string" ||
       typeof (value as HostInfo).storePath !== "string" ||
-      typeof (value as HostInfo).nixPackageName !== "string"
+      typeof (value as HostInfo).nixPackageName !== "string" ||
+      !isStringArray((value as HostInfo).substituters) ||
+      !isStringArray((value as HostInfo).trustedPublicKeys)
     ) {
       throw new Error(`Unexpected host metadata: ${JSON.stringify(value)}`);
     }
@@ -320,9 +362,14 @@ function buildPlan(): PlanOutput {
     const defaults = systemDefaults[host.hostSystem];
     const cached = isCached(host.storePath);
     const installer = installerFromNixPackage(host.nixPackageName);
+    const substituters = filterSubstituters(host.substituters);
+    const trustedPublicKeys = unique(host.trustedPublicKeys);
 
     console.log(
       `${host.root}.${host.hostName}: ${host.hostSystem} ${installer} ${cached ? "cached" : "missing"} ${host.storePath}`,
+    );
+    console.log(
+      `  host cache config: ${substituters.length} substituter(s), ${trustedPublicKeys.length} trusted public key(s)`,
     );
 
     return {
@@ -335,6 +382,8 @@ function buildPlan(): PlanOutput {
       flakeAttr: flakeAttrForHost(host.root, host.hostName),
       storePath: host.storePath,
       nixPackageName: host.nixPackageName,
+      extraSubstituters: substituters.join(" "),
+      extraTrustedPublicKeys: trustedPublicKeys.join(" "),
       cached,
     };
   });
@@ -369,7 +418,7 @@ function writeGithubSummary(plan: PlanOutput): void {
   const rows = plan.allHosts.include
     .map(
       (entry) =>
-        `| ${entry.root}.${entry.host} | ${entry.system} | ${entry.runner} | ${entry.installer} | ${entry.nixPackageName} | ${entry.cached ? "cached" : "missing"} | ${entry.storePath} |`,
+        `| ${entry.root}.${entry.host} | ${entry.system} | ${entry.runner} | ${entry.installer} | ${entry.nixPackageName} | ${entry.extraSubstituters.split(" ").filter(Boolean).length} | ${entry.extraTrustedPublicKeys.split(" ").filter(Boolean).length} | ${entry.cached ? "cached" : "missing"} | ${entry.storePath} |`,
     )
     .join("\n");
 
@@ -382,8 +431,8 @@ function writeGithubSummary(plan: PlanOutput): void {
       `Roots: \`${configRoots.join(",")}\``,
       `Cache: \`${cacheUrl ?? "none"}\``,
       "",
-      "| Host | System | Runner | Installer | nix.package | Cache | Store path |",
-      "| --- | --- | --- | --- | --- | --- | --- |",
+      "| Host | System | Runner | Installer | nix.package | Substituters | Keys | Cache | Store path |",
+      "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
       rows,
       "",
     ].join("\n"),
