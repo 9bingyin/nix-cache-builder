@@ -4,9 +4,10 @@ let
 
   concatMap = f: values: builtins.concatLists (builtins.map f values);
 
-  isDerivation = value:
-    builtins.isAttrs value && value ? type && value.type == "derivation";
-  packageName = package:
+  isDerivation = value: builtins.isAttrs value && value ? type && value.type == "derivation";
+
+  packageName =
+    package:
     if package ? pname then
       package.pname
     else if package ? name then
@@ -16,7 +17,8 @@ let
     else
       "package";
 
-  sanitize = value:
+  sanitize =
+    value:
     builtins.replaceStrings
       [
         "/"
@@ -42,7 +44,8 @@ let
       ]
       value;
 
-  listToPackageAttrs = prefix: packages:
+  listToPackageAttrs =
+    prefix: packages:
     let
       derivations = builtins.filter isDerivation packages;
     in
@@ -59,34 +62,35 @@ let
       ) (builtins.length derivations)
     );
 
-  optionalPackageAttr = name: package:
-    if isDerivation package then { ${name} = package; } else { };
+  optionalPackageAttr = name: package: if isDerivation package then { ${name} = package; } else { };
+
+  isFlakeModuleDefinition =
+    definition:
+    definition ? file && builtins.match ".*via option flake[.]modules[.].*" definition.file != null;
 
   cfg = host.config or { };
+  options = host.options or { };
 
-  environmentPackages =
-    if cfg ? environment && cfg.environment ? systemPackages then
-      cfg.environment.systemPackages
+  optionDefinitions =
+    option:
+    if option ? definitionsWithLocations then
+      builtins.filter isFlakeModuleDefinition option.definitionsWithLocations
     else
       [ ];
 
-  userPackages =
-    if cfg ? users && cfg.users ? users then
-      concatMap (user: user.packages or [ ]) (attrValues cfg.users.users)
-    else
-      [ ];
+  environmentPackages = concatMap (definition: definition.value) (
+    optionDefinitions (options.environment.systemPackages or { })
+  );
 
-  homeManagerPackages =
-    if cfg ? home-manager && cfg.home-manager ? users then
-      concatMap (user: if user ? home then user.home.packages or [ ] else [ ]) (
-        attrValues cfg.home-manager.users
-      )
-    else
-      [ ];
+  homeManagerUserPackages = concatMap (
+    definition:
+    concatMap (user: if user ? home then user.home.packages or [ ] else [ ]) (
+      attrValues definition.value
+    )
+  ) (optionDefinitions (options.home-manager.users or { }));
 
   nixPackage = if cfg ? nix && cfg.nix ? package then cfg.nix.package else null;
 in
 listToPackageAttrs "environment-systemPackages" environmentPackages
-// listToPackageAttrs "users-users-packages" userPackages
-// listToPackageAttrs "home-manager-users-home-packages" homeManagerPackages
+// listToPackageAttrs "home-manager-users-home-packages" homeManagerUserPackages
 // optionalPackageAttr "nix-package" nixPackage

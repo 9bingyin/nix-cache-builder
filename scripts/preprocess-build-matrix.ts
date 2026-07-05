@@ -188,7 +188,12 @@ function matrixKeyForHost(root: string, host: string): string {
 }
 
 function getFlakeRev(): string {
-  return runRequired("git", ["-C", flakeRef, "rev-parse", "HEAD"]).stdout.trim();
+  return runRequired("git", [
+    "-C",
+    flakeRef,
+    "rev-parse",
+    "HEAD",
+  ]).stdout.trim();
 }
 
 function getHostsForRoot(root: string): HostInfo[] {

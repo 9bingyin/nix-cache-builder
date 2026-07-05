@@ -1,6 +1,11 @@
 #!/usr/bin/env bun
 
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname } from "node:path";
 
 const textDecoder = new TextDecoder();
@@ -8,7 +13,8 @@ const textDecoder = new TextDecoder();
 const flakeRef = requireEnv("FLAKE_REF");
 const flakeAttr = requireEnv("FLAKE_ATTR");
 const outputPath = Bun.env.PACKAGE_MATRIX_PATH ?? "package-matrix.json";
-const selectorPath = Bun.env.HOST_PACKAGES_SELECTOR ?? "scripts/host-packages.nix";
+const selectorPath =
+  Bun.env.HOST_PACKAGES_SELECTOR ?? "scripts/host-packages.nix";
 
 const hostEntry = {
   host: requireEnv("HOST_NAME"),
@@ -138,7 +144,9 @@ function getHostPackages(): PackageInfo[] {
         value.attr !== attr ||
         typeof value.storePath !== "string"
       ) {
-        throw new Error(`Unexpected package metadata for ${attr}: ${JSON.stringify(value)}`);
+        throw new Error(
+          `Unexpected package metadata for ${attr}: ${JSON.stringify(value)}`,
+        );
       }
 
       return { attr, storePath: value.storePath };
@@ -149,16 +157,23 @@ function getHostPackages(): PackageInfo[] {
 function pathInfoExists(parsed: unknown, storePath: string): boolean {
   if (Array.isArray(parsed)) {
     if (parsed.length !== 1) {
-      throw new Error(`Unexpected cache query result for ${storePath}: ${JSON.stringify(parsed)}`);
+      throw new Error(
+        `Unexpected cache query result for ${storePath}: ${JSON.stringify(parsed)}`,
+      );
     }
 
     const [pathInfo] = parsed;
-    return isRecord(pathInfo) && (pathInfo.valid === undefined || pathInfo.valid === true);
+    return (
+      isRecord(pathInfo) &&
+      (pathInfo.valid === undefined || pathInfo.valid === true)
+    );
   }
 
   if (isRecord(parsed)) {
     if (!Object.hasOwn(parsed, storePath)) {
-      throw new Error(`Unexpected cache query result for ${storePath}: ${JSON.stringify(parsed)}`);
+      throw new Error(
+        `Unexpected cache query result for ${storePath}: ${JSON.stringify(parsed)}`,
+      );
     }
 
     const pathInfo = parsed[storePath];
@@ -166,10 +181,16 @@ function pathInfoExists(parsed: unknown, storePath: string): boolean {
       return false;
     }
 
-    return !isRecord(pathInfo) || pathInfo.valid === undefined || pathInfo.valid === true;
+    return (
+      !isRecord(pathInfo) ||
+      pathInfo.valid === undefined ||
+      pathInfo.valid === true
+    );
   }
 
-  throw new Error(`Unexpected cache query result for ${storePath}: ${JSON.stringify(parsed)}`);
+  throw new Error(
+    `Unexpected cache query result for ${storePath}: ${JSON.stringify(parsed)}`,
+  );
 }
 
 function isCachedInStore(storeUrl: string, storePath: string): boolean {
@@ -192,12 +213,16 @@ function cachedStoreUrl(storePath: string): string | undefined {
   return cacheUrls.find((storeUrl) => isCachedInStore(storeUrl, storePath));
 }
 
-function deduplicateByStorePath(packages: readonly PackageInfo[]): PackageInfo[] {
+function deduplicateByStorePath(
+  packages: readonly PackageInfo[],
+): PackageInfo[] {
   const seen = new Set<string>();
 
   return packages.filter((pkg) => {
     if (seen.has(pkg.storePath)) {
-      console.log(`${hostEntry.root}.${hostEntry.host}.${pkg.attr}: duplicate ${pkg.storePath}`);
+      console.log(
+        `${hostEntry.root}.${hostEntry.host}.${pkg.attr}: duplicate ${pkg.storePath}`,
+      );
       return false;
     }
 
@@ -213,7 +238,9 @@ function buildMatrix(): MatrixOutput {
   for (const pkg of packages) {
     const cachedBy = cachedStoreUrl(pkg.storePath);
     const status = cachedBy === undefined ? "missing" : `cached by ${cachedBy}`;
-    console.log(`${hostEntry.root}.${hostEntry.host}.${pkg.attr}: ${status} ${pkg.storePath}`);
+    console.log(
+      `${hostEntry.root}.${hostEntry.host}.${pkg.attr}: ${status} ${pkg.storePath}`,
+    );
 
     if (cachedBy === undefined) {
       missing.push(pkg);
