@@ -10,7 +10,28 @@ import { dirname } from "node:path";
 
 const textDecoder = new TextDecoder();
 
-const flakeRef = requireEnv("FLAKE_REF");
+function normalizeFlakeRef(ref: string): string {
+  // 将本地路径统一规范化为 `path:` 输入，避免 Nix/Lix 在 macOS 上将目录识别为
+  // `git+file:` 输入时因 shallow git 仓库或 git 子进程问题触发 `Broken pipe`。
+  // 显式协议头保持不变，以兼容远程 flake 输入。
+  const trimmed = ref.trim();
+  if (
+    trimmed.startsWith("path:") ||
+    trimmed.startsWith("git+file:") ||
+    trimmed.startsWith("github:") ||
+    trimmed.startsWith("gitlab:") ||
+    trimmed.startsWith("sourcehut:") ||
+    trimmed.startsWith("https://") ||
+    trimmed.startsWith("http://") ||
+    trimmed.startsWith("ssh://") ||
+    trimmed.startsWith("git+")
+  ) {
+    return trimmed;
+  }
+  return `path:${trimmed}`;
+}
+
+const flakeRef = normalizeFlakeRef(requireEnv("FLAKE_REF"));
 const flakeAttr = requireEnv("FLAKE_ATTR");
 const outputPath = Bun.env.PACKAGE_MATRIX_PATH ?? "package-matrix.json";
 const selectorPath =
