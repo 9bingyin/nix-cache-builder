@@ -57,6 +57,7 @@ type CommandResult = {
 type HostInfo = {
   root: string;
   hostName: string;
+  canonicalHostName: string;
   hostSystem: string;
   nixPackageName: string;
   substituters: string[];
@@ -233,9 +234,18 @@ let
     substituters = getNixSetting cfg "substituters" ++ getNixSetting cfg "extra-substituters";
     trustedPublicKeys = getNixSetting cfg "trusted-public-keys" ++ getNixSetting cfg "extra-trusted-public-keys";
   };
+
+  getCanonicalHostName = hostName: cfg:
+    if cfg ? config && cfg.config ? local && cfg.config.local ? host && cfg.config.local.host ? name then
+      cfg.config.local.host.name
+    else if cfg ? config && cfg.config ? networking && cfg.config.networking ? hostName then
+      cfg.config.networking.hostName
+    else
+      hostName;
 in
 configs: builtins.mapAttrs (hostName: cfg: {
   hostName = hostName;
+  canonicalHostName = getCanonicalHostName hostName cfg;
   hostSystem = getSystem cfg;
   nixPackageName = getNixPackageName cfg;
 } // getHostCacheSettings cfg) configs
@@ -268,6 +278,7 @@ configs: builtins.mapAttrs (hostName: cfg: {
       typeof value !== "object" ||
       Array.isArray(value) ||
       typeof (value as HostInfo).hostName !== "string" ||
+      typeof (value as HostInfo).canonicalHostName !== "string" ||
       typeof (value as HostInfo).hostSystem !== "string" ||
       typeof (value as HostInfo).nixPackageName !== "string" ||
       !isStringArray((value as HostInfo).substituters) ||
@@ -287,14 +298,48 @@ function getHosts(): HostInfo[] {
   return configRoots.flatMap((root) => getHostsForRoot(root));
 }
 
-function buildPlan(): PlanOutput {
-  const allHosts = getHosts()
-    .filter((host) => hostFilters.size === 0 || hostFilters.has(host.hostName))
-    .sort((left, right) =>
-      `${left.root}.${left.hostName}`.localeCompare(
-        `${right.root}.${right.hostName}`,
-      ),
+function deduplicateHostAliases(hosts: readonly HostInfo[]): HostInfo[] {
+  const byCanonicalName = new Map<string, HostInfo>();
+
+  for (const host of hosts) {
+    const key = `${host.root}:${host.canonicalHostName}`;
+    const existing = byCanonicalName.get(key);
+    if (existing === undefined) {
+      byCanonicalName.set(key, host);
+      continue;
+    }
+
+    const existingIsAlias = existing.hostName !== existing.canonicalHostName;
+    const hostIsAlias = host.hostName !== host.canonicalHostName;
+    if (existingIsAlias && !hostIsAlias) {
+      console.log(
+        `${existing.root}.${existing.hostName}: alias of ${existing.canonicalHostName}, skipped from host matrix`,
+      );
+      byCanonicalName.set(key, host);
+      continue;
+    }
+
+    console.log(
+      `${host.root}.${host.hostName}: alias of ${host.canonicalHostName}, skipped from host matrix`,
     );
+  }
+
+  return Array.from(byCanonicalName.values());
+}
+
+function buildPlan(): PlanOutput {
+  const allHosts = deduplicateHostAliases(
+    getHosts().filter(
+      (host) =>
+        hostFilters.size === 0 ||
+        hostFilters.has(host.hostName) ||
+        hostFilters.has(host.canonicalHostName),
+    ),
+  ).sort((left, right) =>
+    `${left.root}.${left.hostName}`.localeCompare(
+      `${right.root}.${right.hostName}`,
+    ),
+  );
 
   if (allHosts.length === 0) {
     throw new Error(
