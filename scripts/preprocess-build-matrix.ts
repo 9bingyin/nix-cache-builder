@@ -13,13 +13,6 @@ const configRoots = (
   .split(",")
   .map((root) => root.trim())
   .filter((root) => root.length > 0);
-const cachixName = Bun.env.CACHIX_NAME;
-const cacheUrl =
-  Bun.env.NIX_BINARY_CACHE_URL ??
-  (cachixName === undefined || cachixName.length === 0
-    ? undefined
-    : `https://${cachixName}.cachix.org`);
-const buildOnlyMissing = (Bun.env.BUILD_ONLY_MISSING ?? "true") !== "false";
 const excludedSubstituters = new Set([
   "https://mirrors.ustc.edu.cn/nix-channels/store",
 ]);
@@ -65,15 +58,9 @@ type HostInfo = {
   root: string;
   hostName: string;
   hostSystem: string;
-  storePath: string;
   nixPackageName: string;
   substituters: string[];
   trustedPublicKeys: string[];
-};
-
-type CachePathInfo = {
-  path: string;
-  valid?: boolean;
 };
 
 type MatrixEntry = {
@@ -84,11 +71,10 @@ type MatrixEntry = {
   installer: Installer;
   expectedSystem: string;
   flakeAttr: string;
-  storePath: string;
   nixPackageName: string;
   extraSubstituters: string;
   extraTrustedPublicKeys: string;
-  cached: boolean;
+  matrixKey: string;
 };
 
 type MatrixOutput = {
@@ -96,7 +82,8 @@ type MatrixOutput = {
 };
 
 type PlanOutput = {
-  hasMissing: boolean;
+  hasHosts: boolean;
+  flakeRev: string;
   matrix: MatrixOutput;
   allHosts: MatrixOutput;
 };
@@ -166,17 +153,7 @@ function nixAttrSegment(name: string): string {
 }
 
 function flakeAttrForHost(root: string, host: string): string {
-  const configAttr = `${root}.${nixAttrSegment(host)}`;
-
-  if (root === "darwinConfigurations") {
-    return `${configAttr}.system`;
-  }
-
-  if (root === "nixosConfigurations") {
-    return `${configAttr}.config.system.build.toplevel`;
-  }
-
-  throw new Error(`Unsupported config root for build attr: ${root}`);
+  return `${root}.${nixAttrSegment(host)}`;
 }
 
 function installerFromNixPackage(nixPackageName: string): Installer {
@@ -205,6 +182,14 @@ function filterSubstituters(substituters: readonly string[]): string[] {
   });
 }
 
+function matrixKeyForHost(root: string, host: string): string {
+  return `${root}-${host}`.replace(/[^A-Za-z0-9_-]+/g, "-");
+}
+
+function getFlakeRev(): string {
+  return runRequired("git", ["-C", flakeRef, "rev-parse", "HEAD"]).stdout.trim();
+}
+
 function getHostsForRoot(root: string): HostInfo[] {
   const expression = String.raw`
 let
@@ -223,14 +208,6 @@ let
         throw "Cannot infer nixpkgs.hostPlatform.system"
     else
       throw "Cannot infer host system";
-
-  getStorePath = cfg:
-    if cfg ? system then
-      cfg.system.outPath
-    else if cfg ? config && cfg.config ? system && cfg.config.system ? build && cfg.config.system.build ? toplevel then
-      cfg.config.system.build.toplevel.outPath
-    else
-      throw "Cannot infer system build output";
 
   getNixPackageName = cfg:
     if cfg ? config && cfg.config ? nix && cfg.config.nix ? package then
@@ -260,7 +237,6 @@ in
 configs: builtins.mapAttrs (hostName: cfg: {
   hostName = hostName;
   hostSystem = getSystem cfg;
-  storePath = getStorePath cfg;
   nixPackageName = getNixPackageName cfg;
 } // getHostCacheSettings cfg) configs
 `;
@@ -293,7 +269,6 @@ configs: builtins.mapAttrs (hostName: cfg: {
       Array.isArray(value) ||
       typeof (value as HostInfo).hostName !== "string" ||
       typeof (value as HostInfo).hostSystem !== "string" ||
-      typeof (value as HostInfo).storePath !== "string" ||
       typeof (value as HostInfo).nixPackageName !== "string" ||
       !isStringArray((value as HostInfo).substituters) ||
       !isStringArray((value as HostInfo).trustedPublicKeys)
@@ -310,76 +285,6 @@ configs: builtins.mapAttrs (hostName: cfg: {
 
 function getHosts(): HostInfo[] {
   return configRoots.flatMap((root) => getHostsForRoot(root));
-}
-
-function isCached(storePath: string): boolean {
-  if (cacheUrl === undefined) {
-    return false;
-  }
-
-  const result = runRequired("nix", [
-    "path-info",
-    "--json",
-    "--store",
-    cacheUrl,
-    storePath,
-  ]);
-  const parsed: unknown = JSON.parse(result.stdout);
-
-  if (Array.isArray(parsed)) {
-    if (parsed.length !== 1) {
-      throw new Error(
-        `Unexpected cache query result for ${storePath}: ${result.stdout}`,
-      );
-    }
-
-    const [pathInfo] = parsed as CachePathInfo[];
-    return pathInfo?.valid === true;
-  }
-
-  if (parsed !== null && typeof parsed === "object") {
-    if (!Object.hasOwn(parsed, storePath)) {
-      throw new Error(
-        `Unexpected cache query result for ${storePath}: ${result.stdout}`,
-      );
-    }
-
-    const pathInfo = (parsed as Record<string, unknown>)[storePath];
-    if (pathInfo === null) {
-      return false;
-    }
-
-    if (
-      typeof pathInfo === "object" &&
-      pathInfo !== null &&
-      "valid" in pathInfo
-    ) {
-      return (pathInfo as CachePathInfo).valid === true;
-    }
-
-    return true;
-  }
-
-  throw new Error(
-    `Unexpected cache query result for ${storePath}: ${result.stdout}`,
-  );
-}
-
-function deduplicateBuildEntries(entries: MatrixEntry[]): MatrixEntry[] {
-  const seen = new Set<string>();
-
-  return entries.filter((entry) => {
-    const key = `${entry.system}:${entry.storePath}`;
-    if (seen.has(key)) {
-      console.log(
-        `${entry.root}.${entry.host}: duplicate store path, skipped from build matrix`,
-      );
-      return false;
-    }
-
-    seen.add(key);
-    return true;
-  });
 }
 
 function buildPlan(): PlanOutput {
@@ -409,13 +314,12 @@ function buildPlan(): PlanOutput {
     }
 
     const defaults = systemDefaults[host.hostSystem];
-    const cached = isCached(host.storePath);
     const installer = installerFromNixPackage(host.nixPackageName);
     const substituters = filterSubstituters(host.substituters);
     const trustedPublicKeys = unique(host.trustedPublicKeys);
 
     console.log(
-      `${host.root}.${host.hostName}: ${host.hostSystem} ${installer} ${cached ? "cached" : "missing"} ${host.storePath}`,
+      `${host.root}.${host.hostName}: ${host.hostSystem} ${installer}`,
     );
     console.log(
       `  host cache config: ${substituters.length} substituter(s), ${trustedPublicKeys.length} trusted public key(s)`,
@@ -432,22 +336,17 @@ function buildPlan(): PlanOutput {
       installer,
       expectedSystem: defaults.currentSystem,
       flakeAttr: flakeAttrForHost(host.root, host.hostName),
-      storePath: host.storePath,
       nixPackageName: host.nixPackageName,
       extraSubstituters: substituters.join(" "),
       extraTrustedPublicKeys: trustedPublicKeys.join(" "),
-      cached,
+      matrixKey: matrixKeyForHost(host.root, host.hostName),
     };
   });
 
-  const candidateEntries = buildOnlyMissing
-    ? entries.filter((entry) => !entry.cached)
-    : entries;
-  const buildEntries = deduplicateBuildEntries(candidateEntries);
-
   return {
-    hasMissing: buildEntries.length > 0,
-    matrix: { include: buildEntries },
+    hasHosts: entries.length > 0,
+    flakeRev: getFlakeRev(),
+    matrix: { include: entries },
     allHosts: { include: entries },
   };
 }
@@ -470,21 +369,21 @@ function writeGithubSummary(plan: PlanOutput): void {
   const rows = plan.allHosts.include
     .map(
       (entry) =>
-        `| ${entry.root}.${entry.host} | ${entry.system} | ${entry.runner} | ${entry.installer} | ${entry.nixPackageName} | ${entry.extraSubstituters.split(" ").filter(Boolean).length} | ${entry.extraTrustedPublicKeys.split(" ").filter(Boolean).length} | ${entry.cached ? "cached" : "missing"} | ${entry.storePath} |`,
+        `| ${entry.root}.${entry.host} | ${entry.system} | ${entry.runner} | ${entry.installer} | ${entry.nixPackageName} | ${entry.extraSubstituters.split(" ").filter(Boolean).length} | ${entry.extraTrustedPublicKeys.split(" ").filter(Boolean).length} |`,
     )
     .join("\n");
 
   appendFileSync(
     summaryPath,
     [
-      "## Host cache plan",
+      "## Host package cache plan",
       "",
       `Flake: \`${flakeRef}\``,
+      `Flake revision: \`${plan.flakeRev}\``,
       `Roots: \`${configRoots.join(",")}\``,
-      `Cache: \`${cacheUrl ?? "none"}\``,
       "",
-      "| Host | System | Runner | Installer | nix.package | Substituters | Keys | Cache | Store path |",
-      "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+      "| Host | System | Runner | Installer | nix.package | Substituters | Keys |",
+      "| --- | --- | --- | --- | --- | --- | --- |",
       rows,
       "",
     ].join("\n"),
@@ -495,7 +394,8 @@ const plan = buildPlan();
 const matrix = JSON.stringify(plan.matrix);
 const allHosts = JSON.stringify(plan.allHosts);
 
-writeGithubOutput("has_missing", String(plan.hasMissing));
+writeGithubOutput("has_hosts", String(plan.hasHosts));
+writeGithubOutput("flake_rev", plan.flakeRev);
 writeGithubOutput("matrix", matrix);
 writeGithubOutput("all_hosts", allHosts);
 writeGithubSummary(plan);
