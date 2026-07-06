@@ -174,7 +174,7 @@ jobs:
         run: bun run scripts/export-missing-packages.ts
 
       - name: Upload package matrix
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: package-matrix-${{ matrix.matrixKey }}
           path: package-matrix/${{ matrix.matrixKey }}.json
@@ -195,7 +195,7 @@ jobs:
         uses: oven-sh/setup-bun@v2
 
       - name: Download package matrices
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: package-matrix-*
           path: package-matrices
