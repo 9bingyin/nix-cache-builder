@@ -64,33 +64,26 @@ let
 
   optionalPackageAttr = name: package: if isDerivation package then { ${name} = package; } else { };
 
-  isFlakeModuleDefinition =
-    definition:
-    definition ? file && builtins.match ".*via option flake[.]modules[.].*" definition.file != null;
-
   cfg = host.config or { };
-  options = host.options or { };
 
-  optionDefinitions =
-    option:
-    if option ? definitionsWithLocations then
-      builtins.filter isFlakeModuleDefinition option.definitionsWithLocations
+  environmentPackages = cfg.environment.systemPackages or [ ];
+
+  userPackages =
+    if cfg ? users && cfg.users ? users then
+      concatMap (user: user.packages or [ ]) (attrValues cfg.users.users)
     else
       [ ];
 
-  environmentPackages = concatMap (definition: definition.value) (
-    optionDefinitions (options.environment.systemPackages or { })
-  );
+  homeManagerUsers =
+    if cfg ? home-manager && cfg.home-manager ? users then attrValues cfg.home-manager.users else [ ];
 
   homeManagerUserPackages = concatMap (
-    definition:
-    concatMap (user: if user ? home then user.home.packages or [ ] else [ ]) (
-      attrValues definition.value
-    )
-  ) (optionDefinitions (options.home-manager.users or { }));
+    user: if user ? home then user.home.packages or [ ] else [ ]
+  ) homeManagerUsers;
 
   nixPackage = if cfg ? nix && cfg.nix ? package then cfg.nix.package else null;
 in
 listToPackageAttrs "environment-systemPackages" environmentPackages
+// listToPackageAttrs "users-users-packages" userPackages
 // listToPackageAttrs "home-manager-users-home-packages" homeManagerUserPackages
 // optionalPackageAttr "nix-package" nixPackage
