@@ -37,7 +37,8 @@ env:
     experimental-features = nix-command flakes
     accept-flake-config = true
   NIXPKGS_ALLOW_UNFREE: "1"
-  CACHE_PROBE_CONCURRENCY: "32"
+  # 查缓存 HTTP 并发；matrix 任务并行见各 job 的 max-parallel
+  CACHE_PROBE_CONCURRENCY: "8"
 
 jobs:
   discover-hosts:
@@ -81,7 +82,7 @@ jobs:
     if: ${{ needs.discover-hosts.outputs.has_hosts == 'true' }}
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 4 # 最多同时 export 4 台主机
       matrix: ${{ fromJSON(needs.discover-hosts.outputs.matrix) }}
     name: Export ${{ matrix.root }}.${{ matrix.host }}
     runs-on: ${{ matrix.runner }}
@@ -153,7 +154,7 @@ jobs:
     if: ${{ needs.plan-builds.outputs.has_builds == 'true' }}
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 4 # 最多同时 build 4 个包
       matrix: ${{ fromJSON(needs.plan-builds.outputs.matrix) }}
     name: Build ${{ matrix.packageName }} (${{ matrix.system }})
     runs-on: ${{ matrix.runner }}

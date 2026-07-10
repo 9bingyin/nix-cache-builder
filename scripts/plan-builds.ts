@@ -29,7 +29,7 @@ import {
 } from "./lib/common.ts";
 
 const exportDir = Bun.env.PACKAGE_EXPORT_DIR ?? "package-exports";
-const probeConcurrency = parsePositiveInt(Bun.env.CACHE_PROBE_CONCURRENCY, 32);
+const probeConcurrency = parsePositiveInt(Bun.env.CACHE_PROBE_CONCURRENCY, 8);
 
 type ExportFile = {
   host: HostContext;
@@ -239,18 +239,14 @@ async function findCachedBy(
   storePath: string,
   cacheUrls: readonly string[],
 ): Promise<string | undefined> {
-  if (cacheUrls.length === 0) {
-    return undefined;
+  // 顺序探测，命中即停，避免对每个 path 同时打满所有 cache
+  for (const cacheUrl of cacheUrls) {
+    if (await isPresentInCache(cacheUrl, storePath)) {
+      return cacheUrl;
+    }
   }
 
-  const hits = await Promise.all(
-    cacheUrls.map(async (cacheUrl) => {
-      const present = await isPresentInCache(cacheUrl, storePath);
-      return present ? cacheUrl : undefined;
-    }),
-  );
-
-  return hits.find((hit) => hit !== undefined);
+  return undefined;
 }
 
 async function selectMissing(
