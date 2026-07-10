@@ -36,6 +36,36 @@ type ExportFile = {
   packages: PackageRecord[];
 };
 
+type SharedPathNote = {
+  storePath: string;
+  packageName: string;
+  keptHost: string;
+  keptAttr: string;
+  otherHosts: string[];
+  otherAttrs: string[];
+};
+
+type ProbeNote = {
+  host: string;
+  packageName: string;
+  packageAttr: string;
+  storePath: string;
+  status: "missing" | "cached";
+  cachedBy?: string;
+  foreignCache: boolean;
+  hostSubstituters: string[];
+};
+
+type DedupeResult = {
+  packages: PackageRecord[];
+  sharedPaths: SharedPathNote[];
+};
+
+type ProbeResult = {
+  missing: PackageRecord[];
+  notes: ProbeNote[];
+};
+
 function listJsonFiles(path: string): string[] {
   return readdirSync(path, { withFileTypes: true }).flatMap((entry) => {
     const entryPath = join(path, entry.name);
@@ -70,32 +100,80 @@ function collectPackages(): PackageRecord[] {
   );
 }
 
+function hostLabel(pkg: PackageRecord): string {
+  return `${pkg.root}.${pkg.host}`;
+}
+
+function hostCacheUrls(pkg: PackageRecord): string[] {
+  return unique(
+    pkg.extraSubstituters
+      .split(/\s+/)
+      .map((url) => url.trim().replace(/\/$/, ""))
+      .filter((url) => url.length > 0),
+  );
+}
+
 /** 按 storePath 去重；保留字典序更前的 host 记录作为构建上下文 */
-function dedupeByStorePath(
-  packages: readonly PackageRecord[],
-): PackageRecord[] {
+function dedupeByStorePath(packages: readonly PackageRecord[]): DedupeResult {
   const sorted = [...packages].sort((left, right) =>
     `${left.root}.${left.host}.${left.packageAttr}`.localeCompare(
       `${right.root}.${right.host}.${right.packageAttr}`,
     ),
   );
 
-  const seen = new Set<string>();
-  const uniquePackages: PackageRecord[] = [];
+  const byPath = new Map<
+    string,
+    { kept: PackageRecord; others: PackageRecord[] }
+  >();
 
   for (const pkg of sorted) {
-    if (seen.has(pkg.packageStorePath)) {
-      console.log(
-        `dedupe ${pkg.root}.${pkg.host}.${pkg.packageAttr}: ${pkg.packageStorePath}`,
-      );
+    const existing = byPath.get(pkg.packageStorePath);
+    if (existing === undefined) {
+      byPath.set(pkg.packageStorePath, { kept: pkg, others: [] });
       continue;
     }
 
-    seen.add(pkg.packageStorePath);
-    uniquePackages.push(pkg);
+    existing.others.push(pkg);
   }
 
-  return uniquePackages;
+  const uniquePackages: PackageRecord[] = [];
+  const sharedPaths: SharedPathNote[] = [];
+
+  for (const [storePath, { kept, others }] of byPath) {
+    uniquePackages.push(kept);
+
+    if (others.length === 0) {
+      continue;
+    }
+
+    const note: SharedPathNote = {
+      storePath,
+      packageName: kept.packageName,
+      keptHost: hostLabel(kept),
+      keptAttr: kept.packageAttr,
+      otherHosts: unique(others.map((pkg) => hostLabel(pkg))),
+      otherAttrs: others.map(
+        (pkg) => `${hostLabel(pkg)}:\`${pkg.packageAttr}\``,
+      ),
+    };
+    sharedPaths.push(note);
+
+    console.log(
+      `tip: same path shared by ${note.keptHost} (kept) and ${note.otherHosts.join(", ")}; build context uses ${note.keptHost}`,
+    );
+    console.log(`  path: ${storePath}`);
+    console.log(
+      `  package: ${note.packageName} (${note.keptAttr}); also as ${others
+        .map((pkg) => `${hostLabel(pkg)}:${pkg.packageAttr}`)
+        .join(", ")}`,
+    );
+  }
+
+  sharedPaths.sort((left, right) =>
+    left.packageName.localeCompare(right.packageName),
+  );
+
+  return { packages: uniquePackages, sharedPaths };
 }
 
 function storePathHash(storePath: string): string {
@@ -178,10 +256,21 @@ async function findCachedBy(
 async function selectMissing(
   packages: readonly PackageRecord[],
   cacheUrls: readonly string[],
-): Promise<PackageRecord[]> {
+): Promise<ProbeResult> {
   if (cacheUrls.length === 0) {
     console.log("No cache URLs configured; treating all packages as missing");
-    return [...packages];
+    return {
+      missing: [...packages],
+      notes: packages.map((pkg) => ({
+        host: hostLabel(pkg),
+        packageName: pkg.packageName,
+        packageAttr: pkg.packageAttr,
+        storePath: pkg.packageStorePath,
+        status: "missing" as const,
+        foreignCache: false,
+        hostSubstituters: hostCacheUrls(pkg),
+      })),
+    };
   }
 
   console.log(
@@ -190,16 +279,50 @@ async function selectMissing(
 
   const probes = await mapPool(packages, probeConcurrency, async (pkg) => {
     const cachedBy = await findCachedBy(pkg.packageStorePath, cacheUrls);
+    const ownCaches = hostCacheUrls(pkg);
+    const foreignCache =
+      cachedBy !== undefined &&
+      ownCaches.length > 0 &&
+      !ownCaches.includes(cachedBy);
+
     const status = cachedBy === undefined ? "missing" : `cached by ${cachedBy}`;
     console.log(
-      `${pkg.root}.${pkg.host}.${pkg.packageAttr} (${pkg.packageName}): ${status}`,
+      `${hostLabel(pkg)}.${pkg.packageAttr} (${pkg.packageName}): ${status}`,
     );
-    return { pkg, cachedBy };
+
+    if (foreignCache && cachedBy !== undefined) {
+      console.log(
+        `tip: ${hostLabel(pkg)} path hit foreign cache ${cachedBy} (not in this host substituters: ${ownCaches.join(" ") || "none"})`,
+      );
+      console.log(`  path: ${pkg.packageStorePath}`);
+    }
+
+    const note: ProbeNote = {
+      host: hostLabel(pkg),
+      packageName: pkg.packageName,
+      packageAttr: pkg.packageAttr,
+      storePath: pkg.packageStorePath,
+      status: cachedBy === undefined ? "missing" : "cached",
+      ...(cachedBy === undefined ? {} : { cachedBy }),
+      foreignCache,
+      hostSubstituters: ownCaches,
+    };
+
+    return { pkg, cachedBy, note };
   });
 
-  return probes
-    .filter((probe) => probe.cachedBy === undefined)
-    .map((probe) => probe.pkg);
+  probes.sort((left, right) =>
+    `${left.note.host}.${left.note.packageAttr}`.localeCompare(
+      `${right.note.host}.${right.note.packageAttr}`,
+    ),
+  );
+
+  return {
+    missing: probes
+      .filter((probe) => probe.cachedBy === undefined)
+      .map((probe) => probe.pkg),
+    notes: probes.map((probe) => probe.note),
+  };
 }
 
 function toBuildMatrix(
@@ -221,14 +344,135 @@ function toBuildMatrix(
   return { include };
 }
 
+function markdownTable(headers: string[], rows: string[][]): string[] {
+  if (rows.length === 0) {
+    return ["_none_", ""];
+  }
+
+  return [
+    `| ${headers.join(" | ")} |`,
+    `| ${headers.map(() => "---").join(" | ")} |`,
+    ...rows.map((row) => `| ${row.join(" | ")} |`),
+    "",
+  ];
+}
+
+function buildSummary(args: {
+  exportedCount: number;
+  uniqueCount: number;
+  missingCount: number;
+  cacheUrls: readonly string[];
+  sharedPaths: readonly SharedPathNote[];
+  probeNotes: readonly ProbeNote[];
+  matrix: MatrixOutput<BuildMatrixEntry>;
+}): string[] {
+  const cached = args.probeNotes.filter((note) => note.status === "cached");
+  const foreign = args.probeNotes.filter((note) => note.foreignCache);
+  const missingNotes = args.probeNotes.filter(
+    (note) => note.status === "missing",
+  );
+
+  return [
+    "## plan-builds",
+    "",
+    "### Overview",
+    "",
+    `| Metric | Value |`,
+    `| --- | --- |`,
+    `| Exported records | \`${args.exportedCount}\` |`,
+    `| Unique store paths | \`${args.uniqueCount}\` |`,
+    `| Shared paths (multi-host) | \`${args.sharedPaths.length}\` |`,
+    `| Cached | \`${cached.length}\` |`,
+    `| Foreign cache hits | \`${foreign.length}\` |`,
+    `| Missing (to build) | \`${args.missingCount}\` |`,
+    `| Caches probed | \`${args.cacheUrls.join(" ") || "none"}\` |`,
+    `| Probe concurrency | \`${probeConcurrency}\` |`,
+    "",
+    "### Shared store paths",
+    "",
+    "Same `storePath` appears on multiple hosts; only one build context is kept.",
+    "",
+    ...markdownTable(
+      ["Package", "Kept host", "Also on", "Store path"],
+      args.sharedPaths.map((note) => [
+        note.packageName,
+        `\`${note.keptHost}\` (\`${note.keptAttr}\`)`,
+        note.otherHosts.map((host) => `\`${host}\``).join(", "),
+        `\`${note.storePath}\``,
+      ]),
+    ),
+    "### Foreign cache hits",
+    "",
+    "Path is cached, but the hit URL is **not** in the kept host's own substituters.",
+    "",
+    ...markdownTable(
+      ["Host", "Package", "Hit cache", "Host substituters", "Store path"],
+      foreign.map((note) => [
+        `\`${note.host}\``,
+        note.packageName,
+        `\`${note.cachedBy ?? ""}\``,
+        note.hostSubstituters.map((url) => `\`${url}\``).join(" ") || "_none_",
+        `\`${note.storePath}\``,
+      ]),
+    ),
+    "### Cached packages",
+    "",
+    ...markdownTable(
+      ["Host", "Package", "Cache", "Foreign?", "Store path"],
+      cached.map((note) => [
+        `\`${note.host}\``,
+        note.packageName,
+        `\`${note.cachedBy ?? ""}\``,
+        note.foreignCache ? "yes" : "no",
+        `\`${note.storePath}\``,
+      ]),
+    ),
+    "### Missing packages (build matrix)",
+    "",
+    ...markdownTable(
+      ["System", "Name", "Host", "Attr", "Store path"],
+      args.matrix.include.map((entry) => [
+        entry.system,
+        entry.packageName,
+        `\`${entry.root}.${entry.host}\``,
+        `\`${entry.packageAttr}\``,
+        `\`${entry.packageStorePath}\``,
+      ]),
+    ),
+    // 若 probe 与 matrix 不一致时仍保留 missing notes 细节（一般相同）
+    ...(missingNotes.length !== args.matrix.include.length
+      ? [
+          "### Missing probe notes",
+          "",
+          ...markdownTable(
+            ["Host", "Package", "Attr", "Store path"],
+            missingNotes.map((note) => [
+              `\`${note.host}\``,
+              note.packageName,
+              `\`${note.packageAttr}\``,
+              `\`${note.storePath}\``,
+            ]),
+          ),
+        ]
+      : []),
+  ];
+}
+
 const allPackages = collectPackages();
-const uniquePackages = dedupeByStorePath(allPackages);
+const { packages: uniquePackages, sharedPaths } =
+  dedupeByStorePath(allPackages);
 const cacheUrls = collectCacheUrls(uniquePackages);
-const missing = await selectMissing(uniquePackages, cacheUrls);
+const { missing, notes: probeNotes } = await selectMissing(
+  uniquePackages,
+  cacheUrls,
+);
 const matrix = toBuildMatrix(missing);
 
 console.log(
   `plan-builds: ${allPackages.length} exported -> ${uniquePackages.length} unique -> ${missing.length} missing builds`,
+);
+console.log(
+  `notes: shared_paths=${sharedPaths.length} foreign_hits=${probeNotes.filter((n) => n.foreignCache).length}`,
 );
 
 writeGithubOutput("has_builds", String(matrix.include.length > 0));
@@ -236,29 +480,16 @@ writeGithubOutput("matrix", JSON.stringify(matrix));
 writeGithubOutput("package_count", String(uniquePackages.length));
 writeGithubOutput("missing_count", String(missing.length));
 
-writeGithubSummary([
-  "## plan-builds",
-  "",
-  `Exported records: \`${allPackages.length}\``,
-  `Unique store paths: \`${uniquePackages.length}\``,
-  `Missing (to build): \`${missing.length}\``,
-  `Caches: \`${cacheUrls.join(" ") || "none"}\``,
-  `Probe concurrency: \`${probeConcurrency}\``,
-  "",
-  "| System | Name | Host | Attr |",
-  "| --- | --- | --- | --- |",
-  ...matrix.include
-    .slice(0, 80)
-    .map(
-      (entry) =>
-        `| ${entry.system} | ${entry.packageName} | ${entry.root}.${entry.host} | \`${entry.packageAttr}\` |`,
-    ),
-  ...(matrix.include.length > 80
-    ? [`| ... | ${matrix.include.length - 80} more | | |`]
-    : matrix.include.length === 0
-      ? ["| - | all cached | - | - |"]
-      : []),
-  "",
-]);
+writeGithubSummary(
+  buildSummary({
+    exportedCount: allPackages.length,
+    uniqueCount: uniquePackages.length,
+    missingCount: missing.length,
+    cacheUrls,
+    sharedPaths,
+    probeNotes,
+    matrix,
+  }),
+);
 
 console.log(JSON.stringify(matrix, null, 2));
