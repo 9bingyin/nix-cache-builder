@@ -30,7 +30,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: host-cachix-${{ github.ref }}
+  group: host-binary-cache-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -40,18 +40,17 @@ env:
     experimental-features = nix-command flakes
     accept-flake-config = true
   NIXPKGS_ALLOW_UNFREE: "1"
-  # 并发探测 binary cache narinfo 的请求数
   CACHE_PROBE_CONCURRENCY: "32"
 
 jobs:
-  host-info:
+  # ── 1. 枚举主机 ──────────────────────────────────────────────
+  discover-hosts:
     if: ${{ vars.CACHIX_NAME != '' }}
     runs-on: ubuntu-latest
     outputs:
-      has_hosts: ${{ steps.plan.outputs.has_hosts }}
-      matrix: ${{ steps.plan.outputs.matrix }}
-      all_hosts: ${{ steps.plan.outputs.all_hosts }}
-      flake_rev: ${{ steps.plan.outputs.flake_rev }}
+      has_hosts: ${{ steps.discover.outputs.has_hosts }}
+      matrix: ${{ steps.discover.outputs.matrix }}
+      flake_rev: ${{ steps.discover.outputs.flake_rev }}
 
     steps:
       - name: Checkout cache builder
@@ -64,7 +63,7 @@ jobs:
           token: ${{ secrets.FLAKE_REPO_TOKEN }}
           path: ${{ env.FLAKE_CHECKOUT_PATH }}
 
-      - name: Install Nix for host info
+      - name: Install Nix
         uses: cachix/install-nix-action@v31
         with:
           github_access_token: ${{ secrets.FLAKE_REPO_TOKEN }}
@@ -80,8 +79,8 @@ jobs:
       - name: Typecheck scripts
         run: bun install --frozen-lockfile && bun run typecheck
 
-      - id: plan
-        name: Build host matrix
+      - id: discover
+        name: Discover hosts
         env:
           FLAKE_REF: ./${{ env.FLAKE_CHECKOUT_PATH }}
           CONFIG_ROOTS: darwinConfigurations,nixosConfigurations
@@ -90,16 +89,17 @@ jobs:
           X86_64_DARWIN_RUNNER: ${{ vars.X86_64_DARWIN_RUNNER || 'macos-15-intel' }}
           X86_64_LINUX_RUNNER: ${{ vars.X86_64_LINUX_RUNNER || 'ubuntu-24.04' }}
           AARCH64_LINUX_RUNNER: ${{ vars.AARCH64_LINUX_RUNNER || 'ubuntu-24.04-arm' }}
-        run: bun run scripts/preprocess-build-matrix.ts
+        run: bun run scripts/discover-hosts.ts
 
-  package-plan:
-    needs: host-info
-    if: ${{ needs.host-info.outputs.has_hosts == 'true' }}
+  # ── 2. 原生导出包列表 ────────────────────────────────────────
+  export-packages:
+    needs: discover-hosts
+    if: ${{ needs.discover-hosts.outputs.has_hosts == 'true' }}
     strategy:
       fail-fast: false
       max-parallel: 4
-      matrix: ${{ fromJSON(needs.host-info.outputs.matrix) }}
-    name: Export missing packages for ${{ matrix.root }}.${{ matrix.host }}
+      matrix: ${{ fromJSON(needs.discover-hosts.outputs.matrix) }}
+    name: Export packages ${{ matrix.root }}.${{ matrix.host }}
     runs-on: ${{ matrix.runner }}
 
     steps:
@@ -112,18 +112,18 @@ jobs:
           repository: ${{ env.FLAKE_REPOSITORY }}
           token: ${{ secrets.FLAKE_REPO_TOKEN }}
           path: ${{ env.FLAKE_CHECKOUT_PATH }}
-          ref: ${{ needs.host-info.outputs.flake_rev }}
+          ref: ${{ needs.discover-hosts.outputs.flake_rev }}
 
       - name: Verify private flake revision
         run: |
           set -euo pipefail
           actual_rev="$(git -C "${FLAKE_CHECKOUT_PATH}" rev-parse HEAD)"
-          expected_rev='${{ needs.host-info.outputs.flake_rev }}'
+          expected_rev='${{ needs.discover-hosts.outputs.flake_rev }}'
           echo "actual_rev=${actual_rev}"
           echo "expected_rev=${expected_rev}"
           test "${actual_rev}" = "${expected_rev}"
 
-      - name: Install native Lix
+      - name: Install Lix
         if: ${{ matrix.installer == 'lix' }}
         uses: canidae-solutions/lix-quick-install-action@v4
         with:
@@ -132,7 +132,7 @@ jobs:
             extra-substituters = ${{ matrix.extraSubstituters }}
             extra-trusted-public-keys = ${{ matrix.extraTrustedPublicKeys }}
 
-      - name: Install native Nix
+      - name: Install Nix
         if: ${{ matrix.installer == 'nix' }}
         uses: cachix/install-nix-action@v31
         with:
@@ -146,49 +146,40 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
 
-      - name: Verify native Nix system
+      - name: Verify native system
         run: |
           set -euo pipefail
           actual_system="$(nix eval --raw --impure --expr builtins.currentSystem)"
           expected_system='${{ matrix.expectedSystem }}'
           echo "actual_system=${actual_system}"
           echo "expected_system=${expected_system}"
-          echo "installer=${{ matrix.installer }}"
-          echo "nix_package=${{ matrix.nixPackageName }}"
           test "${actual_system}" = "${expected_system}"
 
-      - name: Export uncached package matrix
+      - name: Export host packages
         env:
-          CACHIX_NAME: ${{ vars.CACHIX_NAME }}
-          CACHE_PROBE_CONCURRENCY: ${{ env.CACHE_PROBE_CONCURRENCY }}
           FLAKE_REF: ./${{ env.FLAKE_CHECKOUT_PATH }}
-          FLAKE_ATTR: ${{ matrix.flakeAttr }}
-          HOST_NAME: ${{ matrix.host }}
-          HOST_ROOT: ${{ matrix.root }}
-          HOST_SYSTEM: ${{ matrix.system }}
-          HOST_RUNNER: ${{ matrix.runner }}
-          HOST_INSTALLER: ${{ matrix.installer }}
-          HOST_EXPECTED_SYSTEM: ${{ matrix.expectedSystem }}
-          HOST_NIX_PACKAGE_NAME: ${{ matrix.nixPackageName }}
-          HOST_EXTRA_SUBSTITUTERS: ${{ matrix.extraSubstituters }}
-          HOST_EXTRA_TRUSTED_PUBLIC_KEYS: ${{ matrix.extraTrustedPublicKeys }}
-          HOST_MATRIX_KEY: ${{ matrix.matrixKey }}
-          PACKAGE_MATRIX_PATH: package-matrix/${{ matrix.matrixKey }}.json
-        run: bun run scripts/export-missing-packages.ts
+          # 整段 HostContext 透传，避免拆成十几个 HOST_* 变量
+          HOST_JSON: ${{ toJSON(matrix) }}
+          PACKAGE_EXPORT_PATH: package-export/${{ matrix.matrixKey }}.json
+        run: bun run scripts/export-packages.ts
 
-      - name: Upload package matrix
+      - name: Upload package export
         uses: actions/upload-artifact@v7
         with:
-          name: package-matrix-${{ matrix.matrixKey }}
-          path: package-matrix/${{ matrix.matrixKey }}.json
+          name: package-export-${{ matrix.matrixKey }}
+          path: package-export/${{ matrix.matrixKey }}.json
           if-no-files-found: error
 
-  merge-package-plan:
-    needs: package-plan
+  # ── 3. 查无缓存 + 去重 → 包级 build matrix ───────────────────
+  plan-builds:
+    needs:
+      - discover-hosts
+      - export-packages
     runs-on: ubuntu-latest
     outputs:
-      has_missing: ${{ steps.merge.outputs.has_missing }}
-      matrix: ${{ steps.merge.outputs.matrix }}
+      has_builds: ${{ steps.plan.outputs.has_builds }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      missing_count: ${{ steps.plan.outputs.missing_count }}
 
     steps:
       - name: Checkout cache builder
@@ -197,29 +188,32 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
 
-      - name: Download package matrices
+      - name: Download package exports
         uses: actions/download-artifact@v8
         with:
-          pattern: package-matrix-*
-          path: package-matrices
+          pattern: package-export-*
+          path: package-exports
           merge-multiple: true
 
-      - id: merge
-        name: Merge package matrices into host jobs
+      - id: plan
+        name: Probe caches and build package matrix
         env:
-          PACKAGE_MATRIX_DIR: package-matrices
-        run: bun run scripts/merge-package-matrices.ts
+          PACKAGE_EXPORT_DIR: package-exports
+          CACHIX_NAME: ${{ vars.CACHIX_NAME }}
+          CACHE_PROBE_CONCURRENCY: ${{ env.CACHE_PROBE_CONCURRENCY }}
+        run: bun run scripts/plan-builds.ts
 
-  build-host:
+  # ── 4. 原生并发构建 missing 包 ───────────────────────────────
+  build-packages:
     needs:
-      - host-info
-      - merge-package-plan
-    if: ${{ needs.merge-package-plan.outputs.has_missing == 'true' }}
+      - discover-hosts
+      - plan-builds
+    if: ${{ needs.plan-builds.outputs.has_builds == 'true' }}
     strategy:
       fail-fast: false
       max-parallel: 4
-      matrix: ${{ fromJSON(needs.merge-package-plan.outputs.matrix) }}
-    name: Build ${{ matrix.root }}.${{ matrix.host }} (${{ matrix.packageCount }} pkgs)
+      matrix: ${{ fromJSON(needs.plan-builds.outputs.matrix) }}
+    name: Build ${{ matrix.packageName }} (${{ matrix.system }})
     runs-on: ${{ matrix.runner }}
 
     steps:
@@ -232,18 +226,18 @@ jobs:
           repository: ${{ env.FLAKE_REPOSITORY }}
           token: ${{ secrets.FLAKE_REPO_TOKEN }}
           path: ${{ env.FLAKE_CHECKOUT_PATH }}
-          ref: ${{ needs.host-info.outputs.flake_rev }}
+          ref: ${{ needs.discover-hosts.outputs.flake_rev }}
 
       - name: Verify private flake revision
         run: |
           set -euo pipefail
           actual_rev="$(git -C "${FLAKE_CHECKOUT_PATH}" rev-parse HEAD)"
-          expected_rev='${{ needs.host-info.outputs.flake_rev }}'
+          expected_rev='${{ needs.discover-hosts.outputs.flake_rev }}'
           echo "actual_rev=${actual_rev}"
           echo "expected_rev=${expected_rev}"
           test "${actual_rev}" = "${expected_rev}"
 
-      - name: Install native Lix
+      - name: Install Lix
         if: ${{ matrix.installer == 'lix' }}
         uses: canidae-solutions/lix-quick-install-action@v4
         with:
@@ -252,7 +246,7 @@ jobs:
             extra-substituters = ${{ matrix.extraSubstituters }}
             extra-trusted-public-keys = ${{ matrix.extraTrustedPublicKeys }}
 
-      - name: Install native Nix
+      - name: Install Nix
         if: ${{ matrix.installer == 'nix' }}
         uses: cachix/install-nix-action@v31
         with:
@@ -263,23 +257,21 @@ jobs:
             extra-substituters = ${{ matrix.extraSubstituters }}
             extra-trusted-public-keys = ${{ matrix.extraTrustedPublicKeys }}
 
-      - name: Verify native Nix system
+      - name: Verify native system
         run: |
           set -euo pipefail
           actual_system="$(nix eval --raw --impure --expr builtins.currentSystem)"
           expected_system='${{ matrix.expectedSystem }}'
           echo "actual_system=${actual_system}"
           echo "expected_system=${expected_system}"
-          echo "installer=${{ matrix.installer }}"
-          echo "nix_package=${{ matrix.nixPackageName }}"
-          echo "package_count=${{ matrix.packageCount }}"
-          echo "packages=${{ matrix.packageNames }}"
+          echo "package=${{ matrix.packageName }}"
+          echo "attr=${{ matrix.packageAttr }}"
+          echo "store_path=${{ matrix.packageStorePath }}"
           test "${actual_system}" = "${expected_system}"
 
       - name: Install Cachix CLI
         run: |
           set -euo pipefail
-
           nix profile install nixpkgs#cachix
           echo "$HOME/.nix-profile/bin" >> "$GITHUB_PATH"
 
@@ -291,50 +283,30 @@ jobs:
           ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
         run: |
           set -euo pipefail
-
           nix profile install nixpkgs#attic-client
           export PATH="$HOME/.nix-profile/bin:$PATH"
-
           attic login --set-default ci "$ATTIC_ENDPOINT" "$ATTIC_TOKEN"
           attic use "$ATTIC_CACHE"
 
-      - name: Build missing packages and push cache
+      - name: Build package and push cache
         env:
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
           ATTIC_CACHE: ${{ vars.ATTIC_CACHE }}
           ATTIC_PUSH_BUILD_CLOSURE: ${{ vars.ATTIC_PUSH_BUILD_CLOSURE }}
           ATTIC_IGNORE_UPSTREAM_CACHE_FILTER: ${{ vars.ATTIC_IGNORE_UPSTREAM_CACHE_FILTER }}
-          PACKAGE_ATTRS_JSON: ${{ matrix.packageAttrsJson }}
+          PACKAGE_ATTR_JSON: ${{ matrix.packageAttrJson }}
         run: |
           set -euo pipefail
 
           flake_attr='${{ matrix.flakeAttr }}'
+          package_attr_json="${PACKAGE_ATTR_JSON}"
+          package_selector="$(< scripts/host-packages.nix)"
           substituters='${{ matrix.extraSubstituters }}'
           trusted_public_keys='${{ matrix.extraTrustedPublicKeys }}'
 
-          # 把 wanted attrs 内联进 select 表达式，避免 pure eval 读绝对路径
-          wanted_json_nix="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${PACKAGE_ATTRS_JSON}")"
-          {
-            printf '%s\n' 'host:'
-            printf '%s\n' 'let'
-            printf '%s\n' '  packages = ('
-            cat scripts/host-packages.nix
-            printf '%s\n' '  ) host;'
-            printf '%s\n' "  wanted = builtins.fromJSON ${wanted_json_nix};"
-            printf '%s\n' 'in'
-            printf '%s\n' '  builtins.listToAttrs ('
-            printf '%s\n' '    builtins.map (name: {'
-            printf '%s\n' '      inherit name;'
-            printf '%s\n' '      value = packages.${name};'
-            printf '%s\n' '    }) wanted'
-            printf '%s\n' '  )'
-          } > package-select.nix
-
-          select_expr="$(< package-select.nix)"
-
           args=(
             --flake "./${FLAKE_CHECKOUT_PATH}#${flake_attr}"
-            --select "${select_expr}"
+            --select "host: { ${package_attr_json} = builtins.getAttr ${package_attr_json} ((${package_selector}) host); }"
             --systems '${{ matrix.system }}'
             --skip-cached
             --no-nom

@@ -1,33 +1,29 @@
 #!/usr/bin/env bun
 
-import { appendFileSync } from "node:fs";
+/**
+ * discover-hosts
+ * 从 flake 枚举 darwinConfigurations / nixosConfigurations，产出主机矩阵。
+ *
+ * 输入 env:
+ *   FLAKE_REF, CONFIG_ROOTS?, HOSTS?, HOST_RUNNER_OVERRIDES?,
+ *   AARCH64_DARWIN_RUNNER?, X86_64_DARWIN_RUNNER?,
+ *   X86_64_LINUX_RUNNER?, AARCH64_LINUX_RUNNER?
+ *
+ * 输出 GITHUB_OUTPUT:
+ *   has_hosts, flake_rev, matrix, hosts
+ */
 
-const textDecoder = new TextDecoder();
-
-function normalizeFlakeRef(ref: string): string {
-  // 将本地路径统一规范化为 `path:` 输入，避免 Nix/Lix 在 macOS 上将目录识别为
-  // `git+file:` 输入时因 shallow git 仓库或 git 子进程问题触发 `Broken pipe`。
-  // 显式协议头保持不变，以兼容远程 flake 输入。
-  const trimmed = ref.trim();
-  if (
-    trimmed.startsWith("path:") ||
-    trimmed.startsWith("git+file:") ||
-    trimmed.startsWith("github:") ||
-    trimmed.startsWith("gitlab:") ||
-    trimmed.startsWith("sourcehut:") ||
-    trimmed.startsWith("https://") ||
-    trimmed.startsWith("http://") ||
-    trimmed.startsWith("ssh://") ||
-    trimmed.startsWith("git+")
-  ) {
-    return trimmed;
-  }
-  return `path:${trimmed}`;
-}
-
-function toFilesystemPath(ref: string): string {
-  return ref.startsWith("path:") ? ref.slice("path:".length) : ref;
-}
+import {
+  type HostContext,
+  type MatrixOutput,
+  normalizeFlakeRef,
+  run,
+  runRequired,
+  toFilesystemPath,
+  unique,
+  writeGithubOutput,
+  writeGithubSummary,
+} from "./lib/common.ts";
 
 const flakeRef = normalizeFlakeRef(Bun.env.FLAKE_REF ?? "./flake-config");
 const configRoots = (
@@ -38,6 +34,7 @@ const configRoots = (
   .split(",")
   .map((root) => root.trim())
   .filter((root) => root.length > 0);
+
 const excludedSubstituters = new Set([
   "https://mirrors.ustc.edu.cn/nix-channels/store",
 ]);
@@ -73,13 +70,7 @@ const systemDefaults = {
 type SupportedSystem = keyof typeof systemDefaults;
 type Installer = "lix" | "nix";
 
-type CommandResult = {
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-};
-
-type HostInfo = {
+type RawHostInfo = {
   root: string;
   hostName: string;
   canonicalHostName: string;
@@ -89,29 +80,11 @@ type HostInfo = {
   trustedPublicKeys: string[];
 };
 
-type MatrixEntry = {
-  host: string;
-  root: string;
-  system: SupportedSystem;
-  runner: string;
-  installer: Installer;
-  expectedSystem: string;
-  flakeAttr: string;
-  nixPackageName: string;
-  extraSubstituters: string;
-  extraTrustedPublicKeys: string;
-  matrixKey: string;
-};
-
-type MatrixOutput = {
-  include: MatrixEntry[];
-};
-
-type PlanOutput = {
+type DiscoverOutput = {
   hasHosts: boolean;
   flakeRev: string;
-  matrix: MatrixOutput;
-  allHosts: MatrixOutput;
+  matrix: MatrixOutput<HostContext>;
+  hosts: MatrixOutput<HostContext>;
 };
 
 function parseRunnerOverrides(
@@ -140,37 +113,10 @@ function isSupportedSystem(system: string): system is SupportedSystem {
   return Object.hasOwn(systemDefaults, system);
 }
 
-function run(command: string, args: readonly string[]): CommandResult {
-  const result = Bun.spawnSync([command, ...args], {
-    stdout: "pipe",
-    stderr: "pipe",
-    env: {
-      ...Bun.env,
-      NIXPKGS_ALLOW_UNFREE: "1",
-    },
-  });
-
-  return {
-    stdout: textDecoder.decode(result.stdout),
-    stderr: textDecoder.decode(result.stderr),
-    exitCode: result.exitCode ?? 1,
-  };
-}
-
-function runRequired(command: string, args: readonly string[]): CommandResult {
-  const result = run(command, args);
-  if (result.exitCode === 0) {
-    return result;
-  }
-
-  throw new Error(
-    [
-      `Command failed: ${[command, ...args].join(" ")}`,
-      result.stdout,
-      result.stderr,
-    ]
-      .filter((line) => line.length > 0)
-      .join("\n"),
+function isStringArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.every((item): item is string => typeof item === "string")
   );
 }
 
@@ -184,17 +130,6 @@ function flakeAttrForHost(root: string, host: string): string {
 
 function installerFromNixPackage(nixPackageName: string): Installer {
   return nixPackageName.toLowerCase().includes("lix") ? "lix" : "nix";
-}
-
-function isStringArray(value: unknown): value is string[] {
-  return (
-    Array.isArray(value) &&
-    value.every((item): item is string => typeof item === "string")
-  );
-}
-
-function unique(items: readonly string[]): string[] {
-  return Array.from(new Set(items.filter((item) => item.length > 0)));
 }
 
 function filterSubstituters(substituters: readonly string[]): string[] {
@@ -221,7 +156,7 @@ function getFlakeRev(): string {
   ]).stdout.trim();
 }
 
-function getHostsForRoot(root: string): HostInfo[] {
+function getHostsForRoot(root: string): RawHostInfo[] {
   const expression = String.raw`
 let
   getSystem = cfg:
@@ -307,29 +242,25 @@ configs: builtins.mapAttrs (hostName: cfg: {
       value === null ||
       typeof value !== "object" ||
       Array.isArray(value) ||
-      typeof (value as HostInfo).hostName !== "string" ||
-      typeof (value as HostInfo).canonicalHostName !== "string" ||
-      typeof (value as HostInfo).hostSystem !== "string" ||
-      typeof (value as HostInfo).nixPackageName !== "string" ||
-      !isStringArray((value as HostInfo).substituters) ||
-      !isStringArray((value as HostInfo).trustedPublicKeys)
+      typeof (value as RawHostInfo).hostName !== "string" ||
+      typeof (value as RawHostInfo).canonicalHostName !== "string" ||
+      typeof (value as RawHostInfo).hostSystem !== "string" ||
+      typeof (value as RawHostInfo).nixPackageName !== "string" ||
+      !isStringArray((value as RawHostInfo).substituters) ||
+      !isStringArray((value as RawHostInfo).trustedPublicKeys)
     ) {
       throw new Error(`Unexpected host metadata: ${JSON.stringify(value)}`);
     }
 
     return {
-      ...(value as Omit<HostInfo, "root">),
+      ...(value as Omit<RawHostInfo, "root">),
       root,
     };
   });
 }
 
-function getHosts(): HostInfo[] {
-  return configRoots.flatMap((root) => getHostsForRoot(root));
-}
-
-function deduplicateHostAliases(hosts: readonly HostInfo[]): HostInfo[] {
-  const byCanonicalName = new Map<string, HostInfo>();
+function deduplicateHostAliases(hosts: readonly RawHostInfo[]): RawHostInfo[] {
+  const byCanonicalName = new Map<string, RawHostInfo>();
 
   for (const host of hosts) {
     const key = `${host.root}:${host.canonicalHostName}`;
@@ -343,28 +274,30 @@ function deduplicateHostAliases(hosts: readonly HostInfo[]): HostInfo[] {
     const hostIsAlias = host.hostName !== host.canonicalHostName;
     if (existingIsAlias && !hostIsAlias) {
       console.log(
-        `${existing.root}.${existing.hostName}: alias of ${existing.canonicalHostName}, skipped from host matrix`,
+        `${existing.root}.${existing.hostName}: alias of ${existing.canonicalHostName}, skipped`,
       );
       byCanonicalName.set(key, host);
       continue;
     }
 
     console.log(
-      `${host.root}.${host.hostName}: alias of ${host.canonicalHostName}, skipped from host matrix`,
+      `${host.root}.${host.hostName}: alias of ${host.canonicalHostName}, skipped`,
     );
   }
 
   return Array.from(byCanonicalName.values());
 }
 
-function buildPlan(): PlanOutput {
+function discover(): DiscoverOutput {
   const allHosts = deduplicateHostAliases(
-    getHosts().filter(
-      (host) =>
-        hostFilters.size === 0 ||
-        hostFilters.has(host.hostName) ||
-        hostFilters.has(host.canonicalHostName),
-    ),
+    configRoots
+      .flatMap((root) => getHostsForRoot(root))
+      .filter(
+        (host) =>
+          hostFilters.size === 0 ||
+          hostFilters.has(host.hostName) ||
+          hostFilters.has(host.canonicalHostName),
+      ),
   ).sort((left, right) =>
     `${left.root}.${left.hostName}`.localeCompare(
       `${right.root}.${right.hostName}`,
@@ -379,7 +312,7 @@ function buildPlan(): PlanOutput {
     );
   }
 
-  const entries = allHosts.map((host): MatrixEntry => {
+  const entries = allHosts.map((host): HostContext => {
     if (!isSupportedSystem(host.hostSystem)) {
       throw new Error(
         `Unsupported host system for ${host.root}.${host.hostName}: ${host.hostSystem}. Supported: ${Object.keys(
@@ -395,9 +328,6 @@ function buildPlan(): PlanOutput {
 
     console.log(
       `${host.root}.${host.hostName}: ${host.hostSystem} ${installer}`,
-    );
-    console.log(
-      `  host cache config: ${substituters.length} substituter(s), ${trustedPublicKeys.length} trusted public key(s)`,
     );
 
     return {
@@ -418,61 +348,37 @@ function buildPlan(): PlanOutput {
     };
   });
 
+  const matrix: MatrixOutput<HostContext> = { include: entries };
+
   return {
     hasHosts: entries.length > 0,
     flakeRev: getFlakeRev(),
-    matrix: { include: entries },
-    allHosts: { include: entries },
+    matrix,
+    hosts: matrix,
   };
 }
 
-function writeGithubOutput(name: string, value: string): void {
-  const outputPath = Bun.env.GITHUB_OUTPUT;
-  if (outputPath === undefined || outputPath.length === 0) {
-    return;
-  }
+const result = discover();
 
-  appendFileSync(outputPath, `${name}=${value}\n`);
-}
+writeGithubOutput("has_hosts", String(result.hasHosts));
+writeGithubOutput("flake_rev", result.flakeRev);
+writeGithubOutput("matrix", JSON.stringify(result.matrix));
+writeGithubOutput("hosts", JSON.stringify(result.hosts));
 
-function writeGithubSummary(plan: PlanOutput): void {
-  const summaryPath = Bun.env.GITHUB_STEP_SUMMARY;
-  if (summaryPath === undefined || summaryPath.length === 0) {
-    return;
-  }
+writeGithubSummary([
+  "## discover-hosts",
+  "",
+  `Flake: \`${flakeRef}\``,
+  `Flake revision: \`${result.flakeRev}\``,
+  `Roots: \`${configRoots.join(",")}\``,
+  "",
+  "| Host | System | Runner | Installer | nix.package |",
+  "| --- | --- | --- | --- | --- |",
+  ...result.hosts.include.map(
+    (entry) =>
+      `| ${entry.root}.${entry.host} | ${entry.system} | ${entry.runner} | ${entry.installer} | ${entry.nixPackageName} |`,
+  ),
+  "",
+]);
 
-  const rows = plan.allHosts.include
-    .map(
-      (entry) =>
-        `| ${entry.root}.${entry.host} | ${entry.system} | ${entry.runner} | ${entry.installer} | ${entry.nixPackageName} | ${entry.extraSubstituters.split(" ").filter(Boolean).length} | ${entry.extraTrustedPublicKeys.split(" ").filter(Boolean).length} |`,
-    )
-    .join("\n");
-
-  appendFileSync(
-    summaryPath,
-    [
-      "## Host package cache plan",
-      "",
-      `Flake: \`${flakeRef}\``,
-      `Flake revision: \`${plan.flakeRev}\``,
-      `Roots: \`${configRoots.join(",")}\``,
-      "",
-      "| Host | System | Runner | Installer | nix.package | Substituters | Keys |",
-      "| --- | --- | --- | --- | --- | --- | --- |",
-      rows,
-      "",
-    ].join("\n"),
-  );
-}
-
-const plan = buildPlan();
-const matrix = JSON.stringify(plan.matrix);
-const allHosts = JSON.stringify(plan.allHosts);
-
-writeGithubOutput("has_hosts", String(plan.hasHosts));
-writeGithubOutput("flake_rev", plan.flakeRev);
-writeGithubOutput("matrix", matrix);
-writeGithubOutput("all_hosts", allHosts);
-writeGithubSummary(plan);
-
-console.log(JSON.stringify(plan, null, 2));
+console.log(JSON.stringify(result, null, 2));
