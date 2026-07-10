@@ -36,6 +36,7 @@ const flakeAttr = requireEnv("FLAKE_ATTR");
 const outputPath = Bun.env.PACKAGE_MATRIX_PATH ?? "package-matrix.json";
 const selectorPath =
   Bun.env.HOST_PACKAGES_SELECTOR ?? "scripts/host-packages.nix";
+const probeConcurrency = parsePositiveInt(Bun.env.CACHE_PROBE_CONCURRENCY, 32);
 
 const hostEntry = {
   host: requireEnv("HOST_NAME"),
@@ -68,11 +69,17 @@ type PackageInfo = {
 type MatrixEntry = typeof hostEntry & {
   packageAttr: string;
   packageAttrJson: string;
+  packageName: string;
   packageStorePath: string;
 };
 
 type MatrixOutput = {
   include: MatrixEntry[];
+};
+
+type ProbeResult = {
+  pkg: PackageInfo;
+  cachedBy: string | undefined;
 };
 
 function requireEnv(name: string): string {
@@ -82,6 +89,19 @@ function requireEnv(name: string): string {
   }
 
   return value;
+}
+
+function parsePositiveInt(value: string | undefined, fallback: number): number {
+  if (value === undefined || value.length === 0) {
+    return fallback;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    throw new Error(`Invalid positive integer: ${value}`);
+  }
+
+  return parsed;
 }
 
 function run(command: string, args: readonly string[]): CommandResult {
@@ -130,7 +150,7 @@ function getCacheUrls(): string[] {
   const configured = Bun.env.CACHE_URLS ?? hostEntry.extraSubstituters;
   const urls = configured
     .split(/\s+/)
-    .map((url) => url.trim())
+    .map((url) => url.trim().replace(/\/$/, ""))
     .filter((url) => url.length > 0);
 
   if (urls.length > 0) {
@@ -181,63 +201,88 @@ function getHostPackages(): PackageInfo[] {
     .sort((left, right) => left.attr.localeCompare(right.attr));
 }
 
-function pathInfoExists(parsed: unknown, storePath: string): boolean {
-  if (Array.isArray(parsed)) {
-    if (parsed.length !== 1) {
-      throw new Error(
-        `Unexpected cache query result for ${storePath}: ${JSON.stringify(parsed)}`,
-      );
-    }
-
-    const [pathInfo] = parsed;
-    return (
-      isRecord(pathInfo) &&
-      (pathInfo.valid === undefined || pathInfo.valid === true)
-    );
+function storePathHash(storePath: string): string {
+  const baseName = storePath.split("/").pop();
+  if (baseName === undefined || baseName.length < 32) {
+    throw new Error(`Invalid store path: ${storePath}`);
   }
 
-  if (isRecord(parsed)) {
-    if (!Object.hasOwn(parsed, storePath)) {
-      throw new Error(
-        `Unexpected cache query result for ${storePath}: ${JSON.stringify(parsed)}`,
-      );
-    }
-
-    const pathInfo = parsed[storePath];
-    if (pathInfo === null) {
-      return false;
-    }
-
-    return (
-      !isRecord(pathInfo) ||
-      pathInfo.valid === undefined ||
-      pathInfo.valid === true
-    );
-  }
-
-  throw new Error(
-    `Unexpected cache query result for ${storePath}: ${JSON.stringify(parsed)}`,
-  );
+  return baseName.slice(0, 32);
 }
 
-function isCachedInStore(storeUrl: string, storePath: string): boolean {
-  const result = run("nix", [
-    "path-info",
-    "--json",
-    "--store",
-    storeUrl,
-    storePath,
-  ]);
+function narinfoUrl(cacheUrl: string, storePath: string): string {
+  return `${cacheUrl.replace(/\/$/, "")}/${storePathHash(storePath)}.narinfo`;
+}
 
-  if (result.exitCode !== 0) {
+async function mapPool<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  mapper: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) {
+    return [];
+  }
+
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  const workers = Array.from(
+    { length: Math.min(concurrency, items.length) },
+    async () => {
+      while (true) {
+        const index = nextIndex;
+        nextIndex += 1;
+        if (index >= items.length) {
+          return;
+        }
+
+        results[index] = await mapper(items[index] as T, index);
+      }
+    },
+  );
+
+  await Promise.all(workers);
+  return results;
+}
+
+async function isPresentInCache(
+  cacheUrl: string,
+  storePath: string,
+): Promise<boolean> {
+  const url = narinfoUrl(cacheUrl, storePath);
+
+  try {
+    const head = await fetch(url, { method: "HEAD" });
+    if (head.ok) {
+      return true;
+    }
+
+    // 部分 binary cache 不支持 HEAD，回退 GET
+    if (head.status === 405 || head.status === 501) {
+      const get = await fetch(url, { method: "GET" });
+      return get.ok;
+    }
+
+    // 404/403 等视为未命中；网络层错误由 catch 处理
+    return false;
+  } catch {
     return false;
   }
-
-  return pathInfoExists(JSON.parse(result.stdout), storePath);
 }
 
-function cachedStoreUrl(storePath: string): string | undefined {
-  return cacheUrls.find((storeUrl) => isCachedInStore(storeUrl, storePath));
+async function findCachedBy(storePath: string): Promise<string | undefined> {
+  if (cacheUrls.length === 0) {
+    return undefined;
+  }
+
+  const hits = await Promise.all(
+    cacheUrls.map(async (cacheUrl) => {
+      const present = await isPresentInCache(cacheUrl, storePath);
+      return present ? cacheUrl : undefined;
+    }),
+  );
+
+  return hits.find((hit) => hit !== undefined);
 }
 
 function deduplicateByStorePath(
@@ -258,12 +303,30 @@ function deduplicateByStorePath(
   });
 }
 
-function buildMatrix(): MatrixOutput {
+async function probePackages(
+  packages: readonly PackageInfo[],
+): Promise<ProbeResult[]> {
+  if (cacheUrls.length === 0) {
+    console.log("No cache URLs configured; treating all packages as missing");
+    return packages.map((pkg) => ({ pkg, cachedBy: undefined }));
+  }
+
+  console.log(
+    `Probing ${packages.length} package(s) against ${cacheUrls.length} cache(s) with concurrency=${probeConcurrency}`,
+  );
+
+  return mapPool(packages, probeConcurrency, async (pkg) => ({
+    pkg,
+    cachedBy: await findCachedBy(pkg.storePath),
+  }));
+}
+
+async function buildMatrix(): Promise<MatrixOutput> {
   const packages = deduplicateByStorePath(getHostPackages());
+  const probes = await probePackages(packages);
   const missing: PackageInfo[] = [];
 
-  for (const pkg of packages) {
-    const cachedBy = cachedStoreUrl(pkg.storePath);
+  for (const { pkg, cachedBy } of probes) {
     const status = cachedBy === undefined ? "missing" : `cached by ${cachedBy}`;
     console.log(
       `${hostEntry.root}.${hostEntry.host}.${pkg.attr} (${pkg.name}): ${status} ${pkg.storePath}`,
@@ -274,11 +337,16 @@ function buildMatrix(): MatrixOutput {
     }
   }
 
+  console.log(
+    `Summary: ${packages.length} unique package(s), ${missing.length} missing, ${packages.length - missing.length} cached`,
+  );
+
   return {
     include: missing.map((pkg) => ({
       ...hostEntry,
       packageAttr: pkg.attr,
       packageAttrJson: JSON.stringify(pkg.attr),
+      packageName: pkg.name,
       packageStorePath: pkg.storePath,
     })),
   };
@@ -302,7 +370,7 @@ function writeGithubSummary(matrix: MatrixOutput): void {
   const rows = matrix.include
     .map(
       (entry) =>
-        `| ${entry.root}.${entry.host} | ${entry.packageAttr} | ${entry.packageStorePath} |`,
+        `| ${entry.root}.${entry.host} | ${entry.packageName} | \`${entry.packageAttr}\` | \`${entry.packageStorePath}\` |`,
     )
     .join("\n");
 
@@ -312,16 +380,17 @@ function writeGithubSummary(matrix: MatrixOutput): void {
       `## Missing packages: ${hostEntry.root}.${hostEntry.host}`,
       "",
       `Caches: \`${cacheUrls.join(" ") || "none"}\``,
+      `Probe concurrency: \`${probeConcurrency}\``,
       "",
-      "| Host | Package | Store path |",
-      "| --- | --- | --- |",
-      rows || "| - | - | all cached |",
+      "| Host | Name | Attr | Store path |",
+      "| --- | --- | --- | --- |",
+      rows || "| - | - | - | all cached |",
       "",
     ].join("\n"),
   );
 }
 
-const matrix = buildMatrix();
+const matrix = await buildMatrix();
 mkdirSync(dirname(outputPath), { recursive: true });
 writeFileSync(outputPath, `${JSON.stringify(matrix)}\n`);
 writeGithubOutput("has_missing", String(matrix.include.length > 0));

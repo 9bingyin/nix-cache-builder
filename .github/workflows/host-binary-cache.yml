@@ -40,6 +40,8 @@ env:
     experimental-features = nix-command flakes
     accept-flake-config = true
   NIXPKGS_ALLOW_UNFREE: "1"
+  # 并发探测 binary cache narinfo 的请求数
+  CACHE_PROBE_CONCURRENCY: "32"
 
 jobs:
   host-info:
@@ -158,6 +160,7 @@ jobs:
       - name: Export uncached package matrix
         env:
           CACHIX_NAME: ${{ vars.CACHIX_NAME }}
+          CACHE_PROBE_CONCURRENCY: ${{ env.CACHE_PROBE_CONCURRENCY }}
           FLAKE_REF: ./${{ env.FLAKE_CHECKOUT_PATH }}
           FLAKE_ATTR: ${{ matrix.flakeAttr }}
           HOST_NAME: ${{ matrix.host }}
@@ -202,12 +205,12 @@ jobs:
           merge-multiple: true
 
       - id: merge
-        name: Merge package matrices
+        name: Merge package matrices into host jobs
         env:
           PACKAGE_MATRIX_DIR: package-matrices
         run: bun run scripts/merge-package-matrices.ts
 
-  build-package:
+  build-host:
     needs:
       - host-info
       - merge-package-plan
@@ -216,7 +219,7 @@ jobs:
       fail-fast: false
       max-parallel: 4
       matrix: ${{ fromJSON(needs.merge-package-plan.outputs.matrix) }}
-    name: Build ${{ matrix.root }}.${{ matrix.host }}.${{ matrix.packageAttr }}
+    name: Build ${{ matrix.root }}.${{ matrix.host }} (${{ matrix.packageCount }} pkgs)
     runs-on: ${{ matrix.runner }}
 
     steps:
@@ -269,8 +272,8 @@ jobs:
           echo "expected_system=${expected_system}"
           echo "installer=${{ matrix.installer }}"
           echo "nix_package=${{ matrix.nixPackageName }}"
-          echo "package=${{ matrix.packageAttr }}"
-          echo "store_path=${{ matrix.packageStorePath }}"
+          echo "package_count=${{ matrix.packageCount }}"
+          echo "packages=${{ matrix.packageNames }}"
           test "${actual_system}" = "${expected_system}"
 
       - name: Install Cachix CLI
@@ -295,24 +298,43 @@ jobs:
           attic login --set-default ci "$ATTIC_ENDPOINT" "$ATTIC_TOKEN"
           attic use "$ATTIC_CACHE"
 
-      - name: Build package and push cache
+      - name: Build missing packages and push cache
         env:
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
           ATTIC_CACHE: ${{ vars.ATTIC_CACHE }}
           ATTIC_PUSH_BUILD_CLOSURE: ${{ vars.ATTIC_PUSH_BUILD_CLOSURE }}
           ATTIC_IGNORE_UPSTREAM_CACHE_FILTER: ${{ vars.ATTIC_IGNORE_UPSTREAM_CACHE_FILTER }}
-          PACKAGE_ATTR_JSON: ${{ matrix.packageAttrJson }}
+          PACKAGE_ATTRS_JSON: ${{ matrix.packageAttrsJson }}
         run: |
           set -euo pipefail
 
           flake_attr='${{ matrix.flakeAttr }}'
-          package_attr_json="${PACKAGE_ATTR_JSON}"
-          package_selector="$(< scripts/host-packages.nix)"
           substituters='${{ matrix.extraSubstituters }}'
           trusted_public_keys='${{ matrix.extraTrustedPublicKeys }}'
+
+          # 把 wanted attrs 内联进 select 表达式，避免 pure eval 读绝对路径
+          wanted_json_nix="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${PACKAGE_ATTRS_JSON}")"
+          {
+            printf '%s\n' 'host:'
+            printf '%s\n' 'let'
+            printf '%s\n' '  packages = ('
+            cat scripts/host-packages.nix
+            printf '%s\n' '  ) host;'
+            printf '%s\n' "  wanted = builtins.fromJSON ${wanted_json_nix};"
+            printf '%s\n' 'in'
+            printf '%s\n' '  builtins.listToAttrs ('
+            printf '%s\n' '    builtins.map (name: {'
+            printf '%s\n' '      inherit name;'
+            printf '%s\n' '      value = packages.${name};'
+            printf '%s\n' '    }) wanted'
+            printf '%s\n' '  )'
+          } > package-select.nix
+
+          select_expr="$(< package-select.nix)"
+
           args=(
             --flake "./${FLAKE_CHECKOUT_PATH}#${flake_attr}"
-            --select "host: { ${package_attr_json} = builtins.getAttr ${package_attr_json} ((${package_selector}) host); }"
+            --select "${select_expr}"
             --systems '${{ matrix.system }}'
             --skip-cached
             --no-nom
