@@ -312,6 +312,8 @@ function discover(): DiscoverOutput {
     );
   }
 
+  const flakeRev = getFlakeRev();
+
   const entries = allHosts.map((host): HostContext => {
     if (!isSupportedSystem(host.hostSystem)) {
       throw new Error(
@@ -341,6 +343,7 @@ function discover(): DiscoverOutput {
       installer,
       expectedSystem: defaults.currentSystem,
       flakeAttr: flakeAttrForHost(host.root, host.hostName),
+      flakeRev,
       nixPackageName: host.nixPackageName,
       extraSubstituters: substituters.join(" "),
       extraTrustedPublicKeys: trustedPublicKeys.join(" "),
@@ -352,7 +355,7 @@ function discover(): DiscoverOutput {
 
   return {
     hasHosts: entries.length > 0,
-    flakeRev: getFlakeRev(),
+    flakeRev,
     matrix,
     hosts: matrix,
   };

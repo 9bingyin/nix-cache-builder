@@ -17,6 +17,7 @@ export type HostContext = {
   installer: string;
   expectedSystem: string;
   flakeAttr: string;
+  flakeRev: string;
   nixPackageName: string;
   extraSubstituters: string;
   extraTrustedPublicKeys: string;
@@ -164,6 +165,7 @@ export function isHostContext(value: unknown): value is HostContext {
     typeof value.installer === "string" &&
     typeof value.expectedSystem === "string" &&
     typeof value.flakeAttr === "string" &&
+    typeof value.flakeRev === "string" &&
     typeof value.nixPackageName === "string" &&
     typeof value.extraSubstituters === "string" &&
     typeof value.extraTrustedPublicKeys === "string" &&
