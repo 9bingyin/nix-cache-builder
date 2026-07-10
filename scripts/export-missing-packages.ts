@@ -61,6 +61,7 @@ type CommandResult = {
 
 type PackageInfo = {
   attr: string;
+  name: string;
   storePath: string;
 };
 
@@ -144,7 +145,11 @@ function getCacheUrls(): string[] {
 
 function getHostPackages(): PackageInfo[] {
   const selector = readFileSync(selectorPath, "utf8");
-  const expression = `host: builtins.mapAttrs (attr: package: { inherit attr; storePath = package.outPath; }) ((${selector}) host)`;
+  const expression = `host: builtins.mapAttrs (attr: package: {
+    inherit attr;
+    name = package.pname or package.name or attr;
+    storePath = package.outPath;
+  }) ((${selector}) host)`;
   const result = runRequired("nix", [
     "eval",
     "--json",
@@ -163,14 +168,15 @@ function getHostPackages(): PackageInfo[] {
       if (
         !isRecord(value) ||
         value.attr !== attr ||
-        typeof value.storePath !== "string"
+        typeof value.storePath !== "string" ||
+        typeof value.name !== "string"
       ) {
         throw new Error(
           `Unexpected package metadata for ${attr}: ${JSON.stringify(value)}`,
         );
       }
 
-      return { attr, storePath: value.storePath };
+      return { attr, name: value.name, storePath: value.storePath };
     })
     .sort((left, right) => left.attr.localeCompare(right.attr));
 }
@@ -260,7 +266,7 @@ function buildMatrix(): MatrixOutput {
     const cachedBy = cachedStoreUrl(pkg.storePath);
     const status = cachedBy === undefined ? "missing" : `cached by ${cachedBy}`;
     console.log(
-      `${hostEntry.root}.${hostEntry.host}.${pkg.attr}: ${status} ${pkg.storePath}`,
+      `${hostEntry.root}.${hostEntry.host}.${pkg.attr} (${pkg.name}): ${status} ${pkg.storePath}`,
     );
 
     if (cachedBy === undefined) {

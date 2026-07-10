@@ -1,4 +1,6 @@
 host:
+# 从 nix-darwin / NixOS 主机配置中自动收集需要二进制缓存的包根。
+# 只做 eval，不构建 toplevel；输出为 attrName -> derivation。
 let
   attrValues = attrs: builtins.map (name: attrs.${name}) (builtins.attrNames attrs);
 
@@ -6,11 +8,15 @@ let
 
   isDerivation = value: builtins.isAttrs value && value ? type && value.type == "derivation";
 
+  # fixed-output（源码 tarball 等）不需要我们构建二进制
+  isFixedOutput =
+    package: (package.outputHash or null) != null || (package.outputHashAlgo or null) != null;
+
   packageName =
     package:
-    if package ? pname then
+    if package ? pname && package.pname != null && package.pname != "" then
       package.pname
-    else if package ? name then
+    else if package ? name && package.name != null && package.name != "" then
       package.name
     else if package ? outPath then
       baseNameOf package.outPath
@@ -19,54 +25,67 @@ let
 
   sanitize =
     value:
-    builtins.replaceStrings
-      [
-        "/"
-        ":"
-        " "
-        "."
-        "+"
-        "["
-        "]"
-        "("
-        ")"
-      ]
-      [
-        "-"
-        "-"
-        "-"
-        "-"
-        "-"
-        "-"
-        "-"
-        "-"
-        "-"
-      ]
-      value;
-
-  listToPackageAttrs =
-    prefix: packages:
     let
-      derivations = builtins.filter isDerivation packages;
+      replaced =
+        builtins.replaceStrings
+          [
+            "/"
+            ":"
+            " "
+            "."
+            "+"
+            "["
+            "]"
+            "("
+            ")"
+            "_"
+          ]
+          [
+            "-"
+            "-"
+            "-"
+            "-"
+            "-"
+            "-"
+            "-"
+            "-"
+            "-"
+            "-"
+          ]
+          value;
+      # builtins.split 会夹带匹配组 list，只保留非空字符串段
+      parts = builtins.filter (part: builtins.isString part && part != "") (builtins.split "-+" replaced);
+      collapsed = builtins.concatStringsSep "-" parts;
     in
-    builtins.listToAttrs (
-      builtins.genList (
-        index:
-        let
-          package = builtins.elemAt derivations index;
-        in
-        {
-          name = "${prefix}-${toString index}-${sanitize (packageName package)}";
-          value = package;
-        }
-      ) (builtins.length derivations)
-    );
+    if collapsed == "" then "package" else collapsed;
 
-  optionalPackageAttr = name: package: if isDerivation package then { ${name} = package; } else { };
+  # 内部/元数据包，单独构建没有意义或与真实包列表重叠
+  isNoise =
+    package:
+    let
+      name = packageName package;
+      lower = builtins.stringLength name;
+    in
+    name == "home-manager-path"
+    || name == "hm-session-vars.sh"
+    || name == "home-configuration-reference-manpage"
+    || name == "darwin-uninstaller"
+    || name == "darwin-version"
+    || name == "darwin-option"
+    # 纯 shell 片段 / 生成文件
+    || (lower > 3 && builtins.substring (lower - 3) 3 name == ".sh");
+
+  shouldInclude = package: isDerivation package && !isFixedOutput package && !isNoise package;
+
+  collect = packages: builtins.filter shouldInclude packages;
 
   cfg = host.config or { };
 
   environmentPackages = cfg.environment.systemPackages or [ ];
+
+  defaultPackages = cfg.environment.defaultPackages or [ ];
+
+  fontPackages = if cfg ? fonts then cfg.fonts.packages or [ ] else [ ];
 
   userPackages =
     if cfg ? users && cfg.users ? users then
@@ -82,8 +101,65 @@ let
   ) homeManagerUsers;
 
   nixPackage = if cfg ? nix && cfg.nix ? package then cfg.nix.package else null;
+
+  allPackages = collect (
+    environmentPackages
+    ++ defaultPackages
+    ++ fontPackages
+    ++ userPackages
+    ++ homeManagerUserPackages
+    ++ (if isDerivation nixPackage then [ nixPackage ] else [ ])
+  );
+
+  # 按 outPath 去重，保留首次出现（来源优先级：system → default → fonts → users → hm → nix）
+  dedupeByStorePath =
+    packages:
+    let
+      step =
+        acc: package:
+        let
+          path = builtins.unsafeDiscardStringContext package.outPath;
+        in
+        if builtins.elem path acc.seen then
+          acc
+        else
+          {
+            seen = acc.seen ++ [ path ];
+            packages = acc.packages ++ [ package ];
+          };
+      result = builtins.foldl' step {
+        seen = [ ];
+        packages = [ ];
+      } packages;
+    in
+    result.packages;
+
+  uniquePackages = dedupeByStorePath allPackages;
+
+  # 稳定 attr：sanitize(name) + store hash 前 8 位（与列表顺序无关）
+  # outPath 带 string context，不能直接进 attr 名，需 discard
+  attrName =
+    package:
+    let
+      base = sanitize (packageName package);
+      path = builtins.unsafeDiscardStringContext package.outPath;
+      hash = builtins.substring 11 8 path;
+    in
+    "${base}-${hash}";
+
+  packageAttrs = builtins.listToAttrs (
+    builtins.map (package: {
+      name = attrName package;
+      value = package;
+    }) uniquePackages
+  );
+
+  # 按 attr 名排序，保证 eval JSON 稳定
+  sortedNames = builtins.sort builtins.lessThan (builtins.attrNames packageAttrs);
 in
-listToPackageAttrs "environment-systemPackages" environmentPackages
-// listToPackageAttrs "users-users-packages" userPackages
-// listToPackageAttrs "home-manager-users-home-packages" homeManagerUserPackages
-// optionalPackageAttr "nix-package" nixPackage
+builtins.listToAttrs (
+  builtins.map (name: {
+    inherit name;
+    value = packageAttrs.${name};
+  }) sortedNames
+)
