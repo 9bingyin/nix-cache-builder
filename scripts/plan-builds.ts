@@ -6,6 +6,8 @@
  *
  * 输入 env:
  *   PACKAGE_EXPORT_DIR, CACHE_URLS? / CACHIX_NAME?, CACHE_PROBE_CONCURRENCY?
+ * 探测范围 = CACHE_URLS ∪ 各主机 extraSubstituters ∪ CACHIX_NAME；
+ * 命中但不在本机 substituters 中时标记 foreignCache（仍算 cached，不进 build）。
  *
  * 输出 GITHUB_OUTPUT:
  *   has_builds, matrix, package_count, missing_count
@@ -186,14 +188,11 @@ function storePathHash(storePath: string): string {
 }
 
 function collectCacheUrls(packages: readonly PackageRecord[]): string[] {
+  // 合并 env 与主机传来的 substituters；命中非本机缓存时由 foreignCache 标记，不提前 return 丢掉主机缓存。
   const fromEnv = (Bun.env.CACHE_URLS ?? "")
     .split(/\s+/)
     .map((url) => url.trim().replace(/\/$/, ""))
     .filter((url) => url.length > 0);
-
-  if (fromEnv.length > 0) {
-    return unique(fromEnv);
-  }
 
   const fromHosts = packages.flatMap((pkg) =>
     pkg.extraSubstituters
@@ -202,14 +201,13 @@ function collectCacheUrls(packages: readonly PackageRecord[]): string[] {
       .filter((url) => url.length > 0),
   );
 
-  if (fromHosts.length > 0) {
-    return unique(fromHosts);
-  }
-
   const cachixName = Bun.env.CACHIX_NAME;
-  return cachixName === undefined || cachixName.length === 0
-    ? []
-    : [`https://${cachixName}.cachix.org`];
+  const fromCachix =
+    cachixName === undefined || cachixName.length === 0
+      ? []
+      : [`https://${cachixName}.cachix.org`];
+
+  return unique([...fromEnv, ...fromHosts, ...fromCachix]);
 }
 
 async function isPresentInCache(
