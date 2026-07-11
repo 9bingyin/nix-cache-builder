@@ -1,5 +1,5 @@
 {
-  description = "Build remote Nix host configurations and publish them to Cachix";
+  description = "Build remote Nix host configurations and publish them to Cachix and niks3";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";

@@ -37,6 +37,10 @@ env:
     experimental-features = nix-command flakes
     accept-flake-config = true
   NIXPKGS_ALLOW_UNFREE: "1"
+  # Cachix 与 niks3 都用于下载和构建前的缓存探测。
+  CACHE_URLS: https://${{ vars.CACHIX_NAME }}.cachix.org https://cache.bingyin.org
+  CACHE_TRUSTED_PUBLIC_KEYS: 9bingyin.cachix.org-1:uXB+kYLEeHo6kpX8NIZtRwwPozYR/JRNRMeFaObkvDo= cache.bingyin.org-1:PU5qCuJfhYPKSIRdOMCndVB6Dn9rRRIRVZAnG2uAPSI=
+  NIKS3_SERVER: https://niks3.bingyin.org
   # 查缓存 HTTP 并发；matrix 任务并行见各 job 的 max-parallel
   CACHE_PROBE_CONCURRENCY: "8"
 
@@ -61,8 +65,8 @@ jobs:
         with:
           github_access_token: ${{ secrets.FLAKE_REPO_TOKEN }}
           extra_nix_config: |
-            extra-substituters = https://${{ vars.CACHIX_NAME }}.cachix.org https://nix-community.cachix.org https://cache.numtide.com
-            extra-trusted-public-keys = 9bingyin.cachix.org-1:uXB+kYLEeHo6kpX8NIZtRwwPozYR/JRNRMeFaObkvDo= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs= niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
+            extra-substituters = ${{ env.CACHE_URLS }} https://nix-community.cachix.org https://cache.numtide.com
+            extra-trusted-public-keys = ${{ env.CACHE_TRUSTED_PUBLIC_KEYS }} nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs= niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
 
       - uses: oven-sh/setup-bun@v2
 
@@ -101,16 +105,16 @@ jobs:
         with:
           github_access_token: ${{ secrets.FLAKE_REPO_TOKEN }}
           lix_conf: |
-            extra-substituters = ${{ matrix.extraSubstituters }}
-            extra-trusted-public-keys = ${{ matrix.extraTrustedPublicKeys }}
+            extra-substituters = ${{ env.CACHE_URLS }} ${{ matrix.extraSubstituters }}
+            extra-trusted-public-keys = ${{ env.CACHE_TRUSTED_PUBLIC_KEYS }} ${{ matrix.extraTrustedPublicKeys }}
 
       - if: ${{ matrix.installer == 'nix' }}
         uses: cachix/install-nix-action@v31
         with:
           github_access_token: ${{ secrets.FLAKE_REPO_TOKEN }}
           extra_nix_config: |
-            extra-substituters = ${{ matrix.extraSubstituters }}
-            extra-trusted-public-keys = ${{ matrix.extraTrustedPublicKeys }}
+            extra-substituters = ${{ env.CACHE_URLS }} ${{ matrix.extraSubstituters }}
+            extra-trusted-public-keys = ${{ env.CACHE_TRUSTED_PUBLIC_KEYS }} ${{ matrix.extraTrustedPublicKeys }}
 
       - uses: oven-sh/setup-bun@v2
 
@@ -145,6 +149,7 @@ jobs:
       - id: plan
         env:
           PACKAGE_EXPORT_DIR: package-exports
+          CACHE_URLS: ${{ env.CACHE_URLS }}
           CACHIX_NAME: ${{ vars.CACHIX_NAME }}
           CACHE_PROBE_CONCURRENCY: ${{ env.CACHE_PROBE_CONCURRENCY }}
         run: bun run scripts/plan-builds.ts
@@ -152,6 +157,9 @@ jobs:
   build-packages:
     needs: plan-builds
     if: ${{ needs.plan-builds.outputs.has_builds == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       fail-fast: false
       max-parallel: 4 # 最多同时 build 4 个包
@@ -173,45 +181,63 @@ jobs:
         with:
           github_access_token: ${{ secrets.FLAKE_REPO_TOKEN }}
           lix_conf: |
-            extra-substituters = ${{ matrix.extraSubstituters }}
-            extra-trusted-public-keys = ${{ matrix.extraTrustedPublicKeys }}
+            extra-substituters = ${{ env.CACHE_URLS }} ${{ matrix.extraSubstituters }}
+            extra-trusted-public-keys = ${{ env.CACHE_TRUSTED_PUBLIC_KEYS }} ${{ matrix.extraTrustedPublicKeys }}
 
       - if: ${{ matrix.installer == 'nix' }}
         uses: cachix/install-nix-action@v31
         with:
           github_access_token: ${{ secrets.FLAKE_REPO_TOKEN }}
           extra_nix_config: |
-            extra-substituters = ${{ matrix.extraSubstituters }}
-            extra-trusted-public-keys = ${{ matrix.extraTrustedPublicKeys }}
+            extra-substituters = ${{ env.CACHE_URLS }} ${{ matrix.extraSubstituters }}
+            extra-trusted-public-keys = ${{ env.CACHE_TRUSTED_PUBLIC_KEYS }} ${{ matrix.extraTrustedPublicKeys }}
 
       - env:
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
           CACHIX_NAME: ${{ vars.CACHIX_NAME }}
-          ATTIC_ENDPOINT: ${{ vars.ATTIC_ENDPOINT }}
-          ATTIC_CACHE: ${{ vars.ATTIC_CACHE }}
-          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
-          ATTIC_PUSH_BUILD_CLOSURE: ${{ vars.ATTIC_PUSH_BUILD_CLOSURE }}
-          ATTIC_IGNORE_UPSTREAM_CACHE_FILTER: ${{ vars.ATTIC_IGNORE_UPSTREAM_CACHE_FILTER }}
           PACKAGE_ATTR_JSON: ${{ matrix.packageAttrJson }}
           FLAKE_ATTR: ${{ matrix.flakeAttr }}
           HOST_SYSTEM: ${{ matrix.system }}
-          EXTRA_SUBSTITUTERS: ${{ matrix.extraSubstituters }}
-          EXTRA_TRUSTED_PUBLIC_KEYS: ${{ matrix.extraTrustedPublicKeys }}
+          EXTRA_SUBSTITUTERS: ${{ env.CACHE_URLS }} ${{ matrix.extraSubstituters }}
+          EXTRA_TRUSTED_PUBLIC_KEYS: ${{ env.CACHE_TRUSTED_PUBLIC_KEYS }} ${{ matrix.extraTrustedPublicKeys }}
         run: |
           set -euo pipefail
 
-          tools=(nixpkgs#cachix)
-          if [[ -n "${ATTIC_ENDPOINT:-}" && -n "${ATTIC_CACHE:-}" ]]; then
-            tools+=(nixpkgs#attic-client)
-          fi
-          # shellcheck disable=SC2068
-          nix profile install ${tools[@]}
+          nix profile install nixpkgs#cachix
           export PATH="$HOME/.nix-profile/bin:$PATH"
 
-          if [[ -n "${ATTIC_ENDPOINT:-}" && -n "${ATTIC_CACHE:-}" && -n "${ATTIC_TOKEN:-}" ]]; then
-            attic login --set-default ci "$ATTIC_ENDPOINT" "$ATTIC_TOKEN"
-            attic use "$ATTIC_CACHE"
-          fi
+          # GitHub OIDC token 的有效期较短；niks3 会按需重读此文件，因此在构建期间定期刷新。
+          umask 077
+          token_file="$(mktemp)"
+          refresh_pid=""
+          cleanup() {
+            if [[ -n "$refresh_pid" ]]; then
+              kill "$refresh_pid" 2>/dev/null || true
+            fi
+            rm -f "$token_file" "${token_file}.new"
+          }
+          trap cleanup EXIT
+          refresh_niks3_token() {
+            if ! curl --fail --silent --show-error \
+              -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https%3A%2F%2Fniks3.bingyin.org" \
+              | jq --exit-status --raw-output '.value' >"${token_file}.new"; then
+              rm -f "${token_file}.new"
+              return 1
+            fi
+            mv "${token_file}.new" "$token_file"
+          }
+          refresh_niks3_token
+          (
+            while sleep 180; do
+              until refresh_niks3_token; do
+                echo "warning: failed to refresh niks3 OIDC token; retrying in 15 seconds" >&2
+                sleep 15
+              done
+            done
+          ) &
+          refresh_pid=$!
+          export NIKS3_AUTH_TOKEN_FILE="$token_file"
 
           package_selector="$(< scripts/host-packages.nix)"
           args=(
@@ -222,6 +248,7 @@ jobs:
             --no-nom
             --no-link
             --cachix-cache "${CACHIX_NAME}"
+            --niks3-server "${NIKS3_SERVER}"
           )
 
           if [[ -n "${EXTRA_SUBSTITUTERS}" ]]; then
@@ -229,15 +256,6 @@ jobs:
           fi
           if [[ -n "${EXTRA_TRUSTED_PUBLIC_KEYS}" ]]; then
             args+=(--option trusted-public-keys "${EXTRA_TRUSTED_PUBLIC_KEYS}")
-          fi
-          if [[ -n "${ATTIC_CACHE:-}" ]]; then
-            args+=(--attic-cache "${ATTIC_CACHE}")
-          fi
-          if [[ "${ATTIC_PUSH_BUILD_CLOSURE:-}" == "true" ]]; then
-            args+=(--attic-push-build-closure)
-          fi
-          if [[ "${ATTIC_IGNORE_UPSTREAM_CACHE_FILTER:-}" == "true" ]]; then
-            args+=(--attic-ignore-upstream-cache-filter)
           fi
 
           nix run .#nix-fast-build -- "${args[@]}"
