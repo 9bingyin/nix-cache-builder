@@ -2,11 +2,12 @@
 
 /**
  * discover-hosts
- * 从 flake 枚举 darwinConfigurations / nixosConfigurations，产出主机矩阵。
+ * 阶段 0：只惰性枚举 flake 配置 attrset 中的主机名，不求值主机配置。
+ * 完整配置会在 export-packages 阶段的目标平台 runner 上求值。
  *
  * 输入 env:
- *   FLAKE_REF, CONFIG_ROOTS?, HOSTS?, HOST_RUNNER_OVERRIDES?,
- *   AARCH64_DARWIN_RUNNER?, X86_64_DARWIN_RUNNER?,
+ *   FLAKE_REF, CONFIG_ROOTS?, HOSTS?, HOST_SYSTEM_OVERRIDES?,
+ *   HOST_RUNNER_OVERRIDES?, AARCH64_DARWIN_RUNNER?, X86_64_DARWIN_RUNNER?,
  *   X86_64_LINUX_RUNNER?, AARCH64_LINUX_RUNNER?
  *
  * 输出 GITHUB_OUTPUT:
@@ -14,13 +15,11 @@
  */
 
 import {
-  type HostContext,
+  type HostSeed,
   type MatrixOutput,
   normalizeFlakeRef,
-  run,
   runRequired,
   toFilesystemPath,
-  unique,
   writeGithubOutput,
   writeGithubSummary,
 } from "./lib/common.ts";
@@ -35,10 +34,6 @@ const configRoots = (
   .map((root) => root.trim())
   .filter((root) => root.length > 0);
 
-const excludedSubstituters = new Set([
-  "https://mirrors.ustc.edu.cn/nix-channels/store",
-]);
-
 const hostFilters = new Set(
   (Bun.env.HOSTS ?? "")
     .split(",")
@@ -46,50 +41,41 @@ const hostFilters = new Set(
     .filter((host) => host.length > 0),
 );
 
-const runnerOverrides = parseRunnerOverrides(Bun.env.HOST_RUNNER_OVERRIDES);
+const hostSystemOverrides = parseStringMap(Bun.env.HOST_SYSTEM_OVERRIDES);
+const runnerOverrides = parseStringMap(Bun.env.HOST_RUNNER_OVERRIDES);
 
 const systemDefaults = {
   "aarch64-darwin": {
     runner: Bun.env.AARCH64_DARWIN_RUNNER ?? "macos-15",
-    currentSystem: "aarch64-darwin",
   },
   "x86_64-darwin": {
     runner: Bun.env.X86_64_DARWIN_RUNNER ?? "macos-15-intel",
-    currentSystem: "x86_64-darwin",
   },
   "x86_64-linux": {
     runner: Bun.env.X86_64_LINUX_RUNNER ?? "ubuntu-24.04",
-    currentSystem: "x86_64-linux",
   },
   "aarch64-linux": {
     runner: Bun.env.AARCH64_LINUX_RUNNER ?? "ubuntu-24.04-arm",
-    currentSystem: "aarch64-linux",
   },
 } as const;
 
 type SupportedSystem = keyof typeof systemDefaults;
-type Installer = "lix" | "nix";
 
-type RawHostInfo = {
-  root: string;
-  hostName: string;
-  canonicalHostName: string;
-  hostSystem: string;
-  nixPackageName: string;
-  substituters: string[];
-  trustedPublicKeys: string[];
+// 不改 flake 时，配置根只能给出默认系统。非默认架构必须显式覆盖，
+// 以避免把完整配置求值放到错误 runner 上。
+const rootDefaultSystems: Record<string, SupportedSystem> = {
+  darwinConfigurations: "aarch64-darwin",
+  nixosConfigurations: "x86_64-linux",
 };
 
 type DiscoverOutput = {
   hasHosts: boolean;
   flakeRev: string;
-  matrix: MatrixOutput<HostContext>;
-  hosts: MatrixOutput<HostContext>;
+  matrix: MatrixOutput<HostSeed>;
+  hosts: MatrixOutput<HostSeed>;
 };
 
-function parseRunnerOverrides(
-  value: string | undefined,
-): Record<string, string> {
+function parseStringMap(value: string | undefined): Record<string, string> {
   if (value === undefined || value.trim().length === 0) {
     return {};
   }
@@ -99,11 +85,9 @@ function parseRunnerOverrides(
     parsed === null ||
     typeof parsed !== "object" ||
     Array.isArray(parsed) ||
-    !Object.values(parsed).every((runner) => typeof runner === "string")
+    !Object.values(parsed).every((entry) => typeof entry === "string")
   ) {
-    throw new Error(
-      "HOST_RUNNER_OVERRIDES must be a JSON object of host to runner label",
-    );
+    throw new Error("Host overrides must be a JSON object with string values");
   }
 
   return parsed as Record<string, string>;
@@ -113,34 +97,12 @@ function isSupportedSystem(system: string): system is SupportedSystem {
   return Object.hasOwn(systemDefaults, system);
 }
 
-function isStringArray(value: unknown): value is string[] {
-  return (
-    Array.isArray(value) &&
-    value.every((item): item is string => typeof item === "string")
-  );
-}
-
 function nixAttrSegment(name: string): string {
   return /^[A-Za-z_][A-Za-z0-9_'-]*$/.test(name) ? name : JSON.stringify(name);
 }
 
 function flakeAttrForHost(root: string, host: string): string {
   return `${root}.${nixAttrSegment(host)}`;
-}
-
-function installerFromNixPackage(nixPackageName: string): Installer {
-  return nixPackageName.toLowerCase().includes("lix") ? "lix" : "nix";
-}
-
-function filterSubstituters(substituters: readonly string[]): string[] {
-  return unique(substituters).filter((substituter) => {
-    if (excludedSubstituters.has(substituter)) {
-      console.log(`excluded substituter: ${substituter}`);
-      return false;
-    }
-
-    return true;
-  });
 }
 
 function matrixKeyForHost(root: string, host: string): string {
@@ -156,155 +118,83 @@ function getFlakeRev(): string {
   ]).stdout.trim();
 }
 
-function getHostsForRoot(root: string): RawHostInfo[] {
-  const expression = String.raw`
-let
-  getSystem = cfg:
-    if cfg ? pkgs && cfg.pkgs ? stdenv && cfg.pkgs.stdenv ? hostPlatform && cfg.pkgs.stdenv.hostPlatform ? system then
-      cfg.pkgs.stdenv.hostPlatform.system
-    else if cfg ? config && cfg.config ? nixpkgs && cfg.config.nixpkgs ? hostPlatform then
-      let
-        hostPlatform = cfg.config.nixpkgs.hostPlatform;
-      in
-      if builtins.isString hostPlatform then
-        hostPlatform
-      else if hostPlatform ? system then
-        hostPlatform.system
-      else
-        throw "Cannot infer nixpkgs.hostPlatform.system"
-    else
-      throw "Cannot infer host system";
-
-  getNixPackageName = cfg:
-    if cfg ? config && cfg.config ? nix && cfg.config.nix ? package then
-      let
-        pkg = cfg.config.nix.package;
-      in
-      if builtins.isAttrs pkg && pkg ? pname then
-        pkg.pname
-      else if builtins.isAttrs pkg && pkg ? name then
-        pkg.name
-      else
-        "nix"
-    else
-      "nix";
-
-  getNixSetting = cfg: name:
-    if cfg ? config && cfg.config ? nix && cfg.config.nix ? settings && builtins.hasAttr name cfg.config.nix.settings then
-      builtins.getAttr name cfg.config.nix.settings
-    else
-      [];
-
-  getHostCacheSettings = cfg: {
-    substituters = getNixSetting cfg "substituters" ++ getNixSetting cfg "extra-substituters";
-    trustedPublicKeys = getNixSetting cfg "trusted-public-keys" ++ getNixSetting cfg "extra-trusted-public-keys";
-  };
-
-  getCanonicalHostName = hostName: cfg:
-    if cfg ? config && cfg.config ? local && cfg.config.local ? host && cfg.config.local.host ? name then
-      cfg.config.local.host.name
-    else if cfg ? config && cfg.config ? networking && cfg.config.networking ? hostName then
-      cfg.config.networking.hostName
-    else
-      hostName;
-in
-configs: builtins.mapAttrs (hostName: cfg: {
-  hostName = hostName;
-  canonicalHostName = getCanonicalHostName hostName cfg;
-  hostSystem = getSystem cfg;
-  nixPackageName = getNixPackageName cfg;
-} // getHostCacheSettings cfg) configs
-`;
-
-  const result = run("nix", [
+function getHostsForRoot(root: string): string[] {
+  // builtins.attrNames 不会强制求值 attrset 的值；这使 Linux discovery
+  // 不会实现 Darwin 专用的 derivation 或触发其 platform mismatch。
+  const result = runRequired("nix", [
     "eval",
     "--json",
     `${flakeRef}#${root}`,
     "--apply",
-    expression,
+    "configs: builtins.attrNames configs",
   ]);
-
-  if (result.exitCode !== 0) {
-    console.warn(
-      `Skipping ${flakeRef}#${root}: evaluation failed or attribute is absent`,
-    );
-    console.warn(result.stderr.trim());
-    return [];
-  }
-
   const parsed: unknown = JSON.parse(result.stdout);
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error(`Unexpected ${root} evaluation result: ${result.stdout}`);
+
+  if (!Array.isArray(parsed) || !parsed.every((host) => typeof host === "string")) {
+    throw new Error(`Unexpected ${root} host list: ${result.stdout}`);
   }
 
-  return Object.values(parsed).map((value) => {
-    if (
-      value === null ||
-      typeof value !== "object" ||
-      Array.isArray(value) ||
-      typeof (value as RawHostInfo).hostName !== "string" ||
-      typeof (value as RawHostInfo).canonicalHostName !== "string" ||
-      typeof (value as RawHostInfo).hostSystem !== "string" ||
-      typeof (value as RawHostInfo).nixPackageName !== "string" ||
-      !isStringArray((value as RawHostInfo).substituters) ||
-      !isStringArray((value as RawHostInfo).trustedPublicKeys)
-    ) {
-      throw new Error(`Unexpected host metadata: ${JSON.stringify(value)}`);
-    }
-
-    return {
-      ...(value as Omit<RawHostInfo, "root">),
-      root,
-    };
-  });
+  return parsed;
 }
 
-function deduplicateHostAliases(hosts: readonly RawHostInfo[]): RawHostInfo[] {
-  const byCanonicalName = new Map<string, RawHostInfo>();
+function isSyntheticConfigAlias(root: string, host: string): boolean {
+  // 9bingyin/flake 为默认 Darwin 主机额外导出 `darwinConfigurations.default`。
+  // 它指向同一配置，阶段 0 不应为它再派发一个重复的 export job。
+  return root === "darwinConfigurations" && host === "default";
+}
 
-  for (const host of hosts) {
-    const key = `${host.root}:${host.canonicalHostName}`;
-    const existing = byCanonicalName.get(key);
-    if (existing === undefined) {
-      byCanonicalName.set(key, host);
-      continue;
-    }
+function configuredSystem(root: string, host: string): SupportedSystem {
+  const override =
+    hostSystemOverrides[`${root}.${host}`] ?? hostSystemOverrides[host];
+  const system = override ?? rootDefaultSystems[root];
 
-    const existingIsAlias = existing.hostName !== existing.canonicalHostName;
-    const hostIsAlias = host.hostName !== host.canonicalHostName;
-    if (existingIsAlias && !hostIsAlias) {
-      console.log(
-        `${existing.root}.${existing.hostName}: alias of ${existing.canonicalHostName}, skipped`,
-      );
-      byCanonicalName.set(key, host);
-      continue;
-    }
-
-    console.log(
-      `${host.root}.${host.hostName}: alias of ${host.canonicalHostName}, skipped`,
+  if (system === undefined) {
+    throw new Error(
+      `No default system for ${root}.${host}; set HOST_SYSTEM_OVERRIDES for this host`,
+    );
+  }
+  if (!isSupportedSystem(system)) {
+    throw new Error(
+      `Unsupported system for ${root}.${host}: ${system}. Supported: ${Object.keys(systemDefaults).join(", ")}`,
     );
   }
 
-  return Array.from(byCanonicalName.values());
+  return system;
+}
+
+function configuredRunner(root: string, host: string, system: SupportedSystem): string {
+  return (
+    runnerOverrides[`${root}.${host}`] ??
+    runnerOverrides[host] ??
+    systemDefaults[system].runner
+  );
 }
 
 function discover(): DiscoverOutput {
-  const allHosts = deduplicateHostAliases(
-    configRoots
-      .flatMap((root) => getHostsForRoot(root))
-      .filter(
-        (host) =>
-          hostFilters.size === 0 ||
-          hostFilters.has(host.hostName) ||
-          hostFilters.has(host.canonicalHostName),
-      ),
-  ).sort((left, right) =>
-    `${left.root}.${left.hostName}`.localeCompare(
-      `${right.root}.${right.hostName}`,
-    ),
-  );
+  const flakeRev = getFlakeRev();
+  const hosts = configRoots
+    .flatMap((root) =>
+      getHostsForRoot(root)
+        .filter((host) => !isSyntheticConfigAlias(root, host))
+        .map((host) => {
+          const system = configuredSystem(root, host);
+          return {
+            host,
+            root,
+            runner: configuredRunner(root, host, system),
+            expectedSystem: system,
+            flakeAttr: flakeAttrForHost(root, host),
+            flakeRev,
+            matrixKey: matrixKeyForHost(root, host),
+          } satisfies HostSeed;
+        }),
+    )
+    .filter((host) => hostFilters.size === 0 || hostFilters.has(host.host))
+    .sort((left, right) =>
+      `${left.root}.${left.host}`.localeCompare(`${right.root}.${right.host}`),
+    );
 
-  if (allHosts.length === 0) {
+  if (hosts.length === 0) {
     throw new Error(
       hostFilters.size === 0
         ? `No hosts found under ${flakeRef}#${configRoots.join(",")}`
@@ -312,52 +202,11 @@ function discover(): DiscoverOutput {
     );
   }
 
-  const flakeRev = getFlakeRev();
-
-  const entries = allHosts.map((host): HostContext => {
-    if (!isSupportedSystem(host.hostSystem)) {
-      throw new Error(
-        `Unsupported host system for ${host.root}.${host.hostName}: ${host.hostSystem}. Supported: ${Object.keys(
-          systemDefaults,
-        ).join(", ")}`,
-      );
-    }
-
-    const defaults = systemDefaults[host.hostSystem];
-    const installer = installerFromNixPackage(host.nixPackageName);
-    const substituters = filterSubstituters(host.substituters);
-    const trustedPublicKeys = unique(host.trustedPublicKeys);
-
-    console.log(
-      `${host.root}.${host.hostName}: ${host.hostSystem} ${installer}`,
-    );
-
-    return {
-      host: host.hostName,
-      root: host.root,
-      system: host.hostSystem,
-      runner:
-        runnerOverrides[`${host.root}.${host.hostName}`] ??
-        runnerOverrides[host.hostName] ??
-        defaults.runner,
-      installer,
-      expectedSystem: defaults.currentSystem,
-      flakeAttr: flakeAttrForHost(host.root, host.hostName),
-      flakeRev,
-      nixPackageName: host.nixPackageName,
-      extraSubstituters: substituters.join(" "),
-      extraTrustedPublicKeys: trustedPublicKeys.join(" "),
-      matrixKey: matrixKeyForHost(host.root, host.hostName),
-    };
-  });
-
-  const matrix: MatrixOutput<HostContext> = { include: entries };
-
   return {
-    hasHosts: entries.length > 0,
+    hasHosts: true,
     flakeRev,
-    matrix,
-    hosts: matrix,
+    matrix: { include: hosts },
+    hosts: { include: hosts },
   };
 }
 
@@ -371,15 +220,17 @@ writeGithubOutput("hosts", JSON.stringify(result.hosts));
 writeGithubSummary([
   "## discover-hosts",
   "",
+  "Only configuration names are enumerated here; full configurations are evaluated on their native runners during export-packages.",
+  "",
   `Flake: \`${flakeRef}\``,
   `Flake revision: \`${result.flakeRev}\``,
   `Roots: \`${configRoots.join(",")}\``,
   "",
-  "| Host | System | Runner | Installer | nix.package |",
-  "| --- | --- | --- | --- | --- |",
+  "| Host | Expected system | Runner |",
+  "| --- | --- | --- |",
   ...result.hosts.include.map(
     (entry) =>
-      `| ${entry.root}.${entry.host} | ${entry.system} | ${entry.runner} | ${entry.installer} | ${entry.nixPackageName} |`,
+      `| ${entry.root}.${entry.host} | ${entry.expectedSystem} | ${entry.runner} |`,
   ),
   "",
 ]);

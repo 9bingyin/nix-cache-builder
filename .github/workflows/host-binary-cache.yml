@@ -75,6 +75,10 @@ jobs:
           FLAKE_REF: ./${{ env.FLAKE_CHECKOUT_PATH }}
           CONFIG_ROOTS: darwinConfigurations,nixosConfigurations
           HOSTS: ${{ inputs.hosts }}
+          # 不改 flake 时，非默认平台主机可在仓库变量中显式指定，
+          # 例如 {"darwinConfigurations.Legacy-Mac":"x86_64-darwin"}。
+          HOST_SYSTEM_OVERRIDES: ${{ vars.HOST_SYSTEM_OVERRIDES }}
+          HOST_RUNNER_OVERRIDES: ${{ vars.HOST_RUNNER_OVERRIDES }}
           AARCH64_DARWIN_RUNNER: ${{ vars.AARCH64_DARWIN_RUNNER || 'macos-15' }}
           X86_64_DARWIN_RUNNER: ${{ vars.X86_64_DARWIN_RUNNER || 'macos-15-intel' }}
           X86_64_LINUX_RUNNER: ${{ vars.X86_64_LINUX_RUNNER || 'ubuntu-24.04' }}
@@ -100,21 +104,14 @@ jobs:
           path: ${{ env.FLAKE_CHECKOUT_PATH }}
           ref: ${{ matrix.flakeRev }}
 
-      - if: ${{ matrix.installer == 'lix' }}
-        uses: canidae-solutions/lix-quick-install-action@v4
-        with:
-          github_access_token: ${{ secrets.FLAKE_REPO_TOKEN }}
-          lix_conf: |
-            extra-substituters = ${{ env.CACHE_URLS }} ${{ matrix.extraSubstituters }}
-            extra-trusted-public-keys = ${{ env.CACHE_TRUSTED_PUBLIC_KEYS }} ${{ matrix.extraTrustedPublicKeys }}
-
-      - if: ${{ matrix.installer == 'nix' }}
-        uses: cachix/install-nix-action@v31
+      # 此时只知道主机名称和目标平台；nix.package 与主机缓存设置在原生
+      # runner 完整求值配置后由 export-packages 导出，故 bootstrap 统一使用 Nix。
+      - uses: cachix/install-nix-action@v31
         with:
           github_access_token: ${{ secrets.FLAKE_REPO_TOKEN }}
           extra_nix_config: |
-            extra-substituters = ${{ env.CACHE_URLS }} ${{ matrix.extraSubstituters }}
-            extra-trusted-public-keys = ${{ env.CACHE_TRUSTED_PUBLIC_KEYS }} ${{ matrix.extraTrustedPublicKeys }}
+            extra-substituters = ${{ env.CACHE_URLS }} https://nix-community.cachix.org https://cache.numtide.com
+            extra-trusted-public-keys = ${{ env.CACHE_TRUSTED_PUBLIC_KEYS }} nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs= niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
 
       - uses: oven-sh/setup-bun@v2
 

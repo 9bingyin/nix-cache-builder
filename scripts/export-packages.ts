@@ -2,10 +2,10 @@
 
 /**
  * export-packages
- * 在原生 system 上 eval 主机配置，导出包根列表（不做缓存探测）。
+ * 阶段 1：在主机的原生 system 上完整求值配置，导出缓存设置与包根列表。
  *
  * 输入 env:
- *   FLAKE_REF, HOST_JSON (HostContext), HOST_PACKAGES_SELECTOR?,
+ *   FLAKE_REF, HOST_JSON (HostSeed), HOST_PACKAGES_SELECTOR?,
  *   PACKAGE_EXPORT_PATH?
  *
  * 输出:
@@ -16,22 +16,28 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import {
   type HostContext,
+  type HostSeed,
   type PackageRecord,
   isRecord,
   normalizeFlakeRef,
-  parseHostContextJson,
+  parseHostSeedJson,
   requireEnv,
   runRequired,
+  unique,
   writeGithubOutput,
   writeGithubSummary,
 } from "./lib/common.ts";
 
 const flakeRef = normalizeFlakeRef(requireEnv("FLAKE_REF"));
-const host = parseHostContextJson(requireEnv("HOST_JSON"));
+const hostSeed = parseHostSeedJson(requireEnv("HOST_JSON"));
 const selectorPath =
   Bun.env.HOST_PACKAGES_SELECTOR ?? "scripts/host-packages.nix";
 const outputPath =
-  Bun.env.PACKAGE_EXPORT_PATH ?? `package-export/${host.matrixKey}.json`;
+  Bun.env.PACKAGE_EXPORT_PATH ?? `package-export/${hostSeed.matrixKey}.json`;
+
+const excludedSubstituters = new Set([
+  "https://mirrors.ustc.edu.cn/nix-channels/store",
+]);
 
 type ExportedPackage = {
   attr: string;
@@ -44,28 +50,115 @@ type ExportFile = {
   packages: PackageRecord[];
 };
 
-function getHostPackages(): ExportedPackage[] {
+type EvaluatedHostMetadata = {
+  system: string;
+  nixPackageName: string;
+  substituters: string[];
+  trustedPublicKeys: string[];
+};
+
+type EvaluatedExport = {
+  host: EvaluatedHostMetadata;
+  packages: ExportedPackage[];
+};
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function installerFromNixPackage(nixPackageName: string): "lix" | "nix" {
+  return nixPackageName.toLowerCase().includes("lix") ? "lix" : "nix";
+}
+
+function filterSubstituters(substituters: readonly string[]): string[] {
+  return unique(substituters).filter((substituter) => {
+    if (excludedSubstituters.has(substituter)) {
+      console.log(`excluded substituter: ${substituter}`);
+      return false;
+    }
+
+    return true;
+  });
+}
+
+function getHostExport(seed: HostSeed): EvaluatedExport {
   const selector = readFileSync(selectorPath, "utf8");
-  const expression = `host: builtins.mapAttrs (attr: package: {
+  const expression = `host:
+let
+  getSystem = cfg:
+    if cfg ? pkgs && cfg.pkgs ? stdenv && cfg.pkgs.stdenv ? hostPlatform && cfg.pkgs.stdenv.hostPlatform ? system then
+      cfg.pkgs.stdenv.hostPlatform.system
+    else if cfg ? config && cfg.config ? nixpkgs && cfg.config.nixpkgs ? hostPlatform then
+      let
+        hostPlatform = cfg.config.nixpkgs.hostPlatform;
+      in
+      if builtins.isString hostPlatform then
+        hostPlatform
+      else if hostPlatform ? system then
+        hostPlatform.system
+      else
+        throw "Cannot infer nixpkgs.hostPlatform.system"
+    else
+      throw "Cannot infer host system";
+
+  getNixPackageName = cfg:
+    if cfg ? config && cfg.config ? nix && cfg.config.nix ? package then
+      let
+        pkg = cfg.config.nix.package;
+      in
+      if builtins.isAttrs pkg && pkg ? pname then
+        pkg.pname
+      else if builtins.isAttrs pkg && pkg ? name then
+        pkg.name
+      else
+        "nix"
+    else
+      "nix";
+
+  getNixSetting = cfg: name:
+    if cfg ? config && cfg.config ? nix && cfg.config.nix ? settings && builtins.hasAttr name cfg.config.nix.settings then
+      builtins.getAttr name cfg.config.nix.settings
+    else
+      [];
+
+  packages = ((${selector}) host);
+in
+{
+  host = {
+    system = getSystem host;
+    nixPackageName = getNixPackageName host;
+    substituters = getNixSetting host "substituters" ++ getNixSetting host "extra-substituters";
+    trustedPublicKeys = getNixSetting host "trusted-public-keys" ++ getNixSetting host "extra-trusted-public-keys";
+  };
+  packages = builtins.mapAttrs (attr: package: {
     inherit attr;
     name = package.pname or package.name or attr;
     storePath = package.outPath;
-  }) ((${selector}) host)`;
+  }) packages;
+}`;
 
   const result = runRequired("nix", [
     "eval",
     "--json",
-    `${flakeRef}#${host.flakeAttr}`,
+    `${flakeRef}#${seed.flakeAttr}`,
     "--apply",
     expression,
   ]);
   const parsed: unknown = JSON.parse(result.stdout);
 
-  if (!isRecord(parsed)) {
-    throw new Error(`Unexpected package metadata: ${result.stdout}`);
+  if (
+    !isRecord(parsed) ||
+    !isRecord(parsed.host) ||
+    !isRecord(parsed.packages) ||
+    typeof parsed.host.system !== "string" ||
+    typeof parsed.host.nixPackageName !== "string" ||
+    !isStringArray(parsed.host.substituters) ||
+    !isStringArray(parsed.host.trustedPublicKeys)
+  ) {
+    throw new Error(`Unexpected host export: ${result.stdout}`);
   }
 
-  return Object.entries(parsed)
+  const packages = Object.entries(parsed.packages)
     .map(([attr, value]) => {
       if (
         !isRecord(value) ||
@@ -81,9 +174,42 @@ function getHostPackages(): ExportedPackage[] {
       return { attr, name: value.name, storePath: value.storePath };
     })
     .sort((left, right) => left.attr.localeCompare(right.attr));
+
+  return {
+    host: {
+      system: parsed.host.system,
+      nixPackageName: parsed.host.nixPackageName,
+      substituters: parsed.host.substituters,
+      trustedPublicKeys: parsed.host.trustedPublicKeys,
+    },
+    packages,
+  };
 }
 
-function toRecords(packages: readonly ExportedPackage[]): PackageRecord[] {
+function completeHostContext(
+  seed: HostSeed,
+  metadata: EvaluatedHostMetadata,
+): HostContext {
+  if (metadata.system !== seed.expectedSystem) {
+    throw new Error(
+      `${seed.root}.${seed.host} evaluates to ${metadata.system}, but its discovery runner expects ${seed.expectedSystem}. Set HOST_SYSTEM_OVERRIDES for this host.`,
+    );
+  }
+
+  return {
+    ...seed,
+    system: metadata.system,
+    installer: installerFromNixPackage(metadata.nixPackageName),
+    nixPackageName: metadata.nixPackageName,
+    extraSubstituters: filterSubstituters(metadata.substituters).join(" "),
+    extraTrustedPublicKeys: unique(metadata.trustedPublicKeys).join(" "),
+  };
+}
+
+function toRecords(
+  host: HostContext,
+  packages: readonly ExportedPackage[],
+): PackageRecord[] {
   const seen = new Set<string>();
   const records: PackageRecord[] = [];
 
@@ -107,7 +233,9 @@ function toRecords(packages: readonly ExportedPackage[]): PackageRecord[] {
   return records;
 }
 
-const packages = toRecords(getHostPackages());
+const evaluated = getHostExport(hostSeed);
+const host = completeHostContext(hostSeed, evaluated.host);
+const packages = toRecords(host, evaluated.packages);
 const exportFile: ExportFile = { host, packages };
 
 mkdirSync(dirname(outputPath), { recursive: true });

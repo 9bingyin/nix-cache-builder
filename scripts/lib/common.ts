@@ -8,20 +8,27 @@ export type CommandResult = {
   exitCode: number;
 };
 
-/** 主机上下文：discover-hosts 产出，后续阶段透传 */
-export type HostContext = {
+/**
+ * 阶段 0 仅从 flake attrset 惰性导出的主机候选项。
+ * 不包含完整配置的求值结果，因而可安全运行在非目标平台的 runner 上。
+ */
+export type HostSeed = {
   host: string;
   root: string;
-  system: string;
   runner: string;
-  installer: string;
   expectedSystem: string;
   flakeAttr: string;
   flakeRev: string;
+  matrixKey: string;
+};
+
+/** 阶段 1 在目标平台求值配置后补全的主机上下文。 */
+export type HostContext = HostSeed & {
+  system: string;
+  installer: string;
   nixPackageName: string;
   extraSubstituters: string;
   extraTrustedPublicKeys: string;
-  matrixKey: string;
 };
 
 /** 从主机配置导出的包记录 */
@@ -155,21 +162,31 @@ export function writeGithubSummary(lines: readonly string[]): void {
   appendFileSync(summaryPath, `${lines.join("\n")}\n`);
 }
 
-export function isHostContext(value: unknown): value is HostContext {
+export function isHostSeed(value: unknown): value is HostSeed {
   return (
     isRecord(value) &&
     typeof value.host === "string" &&
     typeof value.root === "string" &&
-    typeof value.system === "string" &&
     typeof value.runner === "string" &&
-    typeof value.installer === "string" &&
     typeof value.expectedSystem === "string" &&
     typeof value.flakeAttr === "string" &&
     typeof value.flakeRev === "string" &&
-    typeof value.nixPackageName === "string" &&
-    typeof value.extraSubstituters === "string" &&
-    typeof value.extraTrustedPublicKeys === "string" &&
     typeof value.matrixKey === "string"
+  );
+}
+
+export function isHostContext(value: unknown): value is HostContext {
+  if (!isHostSeed(value)) {
+    return false;
+  }
+
+  const context = value as HostContext;
+  return (
+    typeof context.system === "string" &&
+    typeof context.installer === "string" &&
+    typeof context.nixPackageName === "string" &&
+    typeof context.extraSubstituters === "string" &&
+    typeof context.extraTrustedPublicKeys === "string"
   );
 }
 
@@ -182,6 +199,15 @@ export function isPackageRecord(value: unknown): value is PackageRecord {
     typeof (value as { packageStorePath?: unknown }).packageStorePath ===
       "string"
   );
+}
+
+export function parseHostSeedJson(raw: string): HostSeed {
+  const parsed: unknown = JSON.parse(raw);
+  if (!isHostSeed(parsed)) {
+    throw new Error(`Invalid HostSeed JSON: ${raw}`);
+  }
+
+  return parsed;
 }
 
 export function parseHostContextJson(raw: string): HostContext {
