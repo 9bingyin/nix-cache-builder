@@ -72,6 +72,10 @@ let
     || name == "darwin-uninstaller"
     || name == "darwin-version"
     || name == "darwin-option"
+    # 由主机配置生成的版本信息脚本；没有可复用的二进制构建价值，
+    # 且 store 路径可能在 plan 与独立 build job 的重新求值间变化。
+    || name == "nixos-version"
+    || name == "nixos-wsl-version"
     # 纯 shell 片段 / 生成文件
     || (lower > 3 && builtins.substring (lower - 3) 3 name == ".sh");
 
