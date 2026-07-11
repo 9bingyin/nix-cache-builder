@@ -200,7 +200,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          nix profile install nixpkgs#cachix
+          nix profile install nixpkgs#cachix nixpkgs#niks3
           export PATH="$HOME/.nix-profile/bin:$PATH"
 
           # GitHub OIDC token 的有效期较短；niks3 会按需重读此文件，因此在构建期间定期刷新。
