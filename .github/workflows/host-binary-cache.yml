@@ -153,7 +153,8 @@ jobs:
 
   build-packages:
     needs: plan-builds
-    if: ${{ needs.plan-builds.outputs.has_builds == 'true' }}
+    # niks3 的 OIDC token 可写入共享缓存，仅允许受信任的触发事件获取。
+    if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.plan-builds.outputs.has_builds == 'true' }}
     permissions:
       contents: read
       id-token: write
