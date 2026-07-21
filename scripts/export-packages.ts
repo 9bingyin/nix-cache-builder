@@ -35,9 +35,15 @@ const selectorPath =
 const outputPath =
   Bun.env.PACKAGE_EXPORT_PATH ?? `package-export/${hostSeed.matrixKey}.json`;
 
-const excludedSubstituters = new Set([
-  "https://mirrors.ustc.edu.cn/nix-channels/store",
-]);
+// 屏蔽所有教育网镜像（如 mirrors.ustc.edu.cn），域名以 .edu.cn 结尾即排除
+function isExcludedSubstituter(substituter: string): boolean {
+  try {
+    const { hostname } = new URL(substituter);
+    return hostname === "edu.cn" || hostname.endsWith(".edu.cn");
+  } catch {
+    return false;
+  }
+}
 
 type ExportedPackage = {
   attr: string;
@@ -72,7 +78,7 @@ function installerFromNixPackage(nixPackageName: string): "lix" | "nix" {
 
 function filterSubstituters(substituters: readonly string[]): string[] {
   return unique(substituters).filter((substituter) => {
-    if (excludedSubstituters.has(substituter)) {
+    if (isExcludedSubstituter(substituter)) {
       console.log(`excluded substituter: ${substituter}`);
       return false;
     }
