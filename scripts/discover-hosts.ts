@@ -130,7 +130,10 @@ function getHostsForRoot(root: string): string[] {
   ]);
   const parsed: unknown = JSON.parse(result.stdout);
 
-  if (!Array.isArray(parsed) || !parsed.every((host) => typeof host === "string")) {
+  if (
+    !Array.isArray(parsed) ||
+    !parsed.every((host) => typeof host === "string")
+  ) {
     throw new Error(`Unexpected ${root} host list: ${result.stdout}`);
   }
 
@@ -162,7 +165,11 @@ function configuredSystem(root: string, host: string): SupportedSystem {
   return system;
 }
 
-function configuredRunner(root: string, host: string, system: SupportedSystem): string {
+function configuredRunner(
+  root: string,
+  host: string,
+  system: SupportedSystem,
+): string {
   return (
     runnerOverrides[`${root}.${host}`] ??
     runnerOverrides[host] ??

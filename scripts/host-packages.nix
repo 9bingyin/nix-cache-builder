@@ -106,6 +106,14 @@ let
 
   nixPackage = if cfg ? nix && cfg.nix ? package then cfg.nix.package else null;
 
+  # NixOS-WSL 的 nativeUtils 不在常规包列表中，却是系统激活闭包的运行时依赖。
+  # 仅纳入这个已知的编译型构建物，避免把整个 toplevel 闭包拆成重复的包级构建。
+  systemBuildNativeUtils =
+    if cfg ? system && cfg.system ? build && cfg.system.build ? nativeUtils then
+      [ cfg.system.build.nativeUtils ]
+    else
+      [ ];
+
   allPackages = collect (
     environmentPackages
     ++ defaultPackages
@@ -113,9 +121,10 @@ let
     ++ userPackages
     ++ homeManagerUserPackages
     ++ (if isDerivation nixPackage then [ nixPackage ] else [ ])
+    ++ systemBuildNativeUtils
   );
 
-  # 按 outPath 去重，保留首次出现（来源优先级：system → default → fonts → users → hm → nix）
+  # 按 outPath 去重，保留首次出现（来源优先级：system → default → fonts → users → hm → nix → system.build）
   dedupeByStorePath =
     packages:
     let
