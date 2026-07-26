@@ -1,4 +1,7 @@
-#!/usr/bin/env bun
+#!/usr/bin/env nix
+/*
+#!nix shell github:NixOS/nixpkgs/nixos-unstable#bun --command bun
+*/
 
 /**
  * discover-hosts

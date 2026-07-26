@@ -68,8 +68,6 @@ jobs:
             extra-substituters = ${{ env.CACHE_URLS }} https://nix-community.cachix.org https://cache.numtide.com
             extra-trusted-public-keys = ${{ env.CACHE_TRUSTED_PUBLIC_KEYS }} nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs= niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
 
-      - uses: oven-sh/setup-bun@v2
-
       - id: discover
         env:
           FLAKE_REF: ./${{ env.FLAKE_CHECKOUT_PATH }}
@@ -83,7 +81,7 @@ jobs:
           X86_64_DARWIN_RUNNER: ${{ vars.X86_64_DARWIN_RUNNER || 'macos-15-intel' }}
           X86_64_LINUX_RUNNER: ${{ vars.X86_64_LINUX_RUNNER || 'ubuntu-24.04' }}
           AARCH64_LINUX_RUNNER: ${{ vars.AARCH64_LINUX_RUNNER || 'ubuntu-24.04-arm' }}
-        run: bun run scripts/discover-hosts.ts
+        run: ./scripts/discover-hosts.ts
 
   export-packages:
     needs: discover-hosts
@@ -113,13 +111,11 @@ jobs:
             extra-substituters = ${{ env.CACHE_URLS }} https://nix-community.cachix.org https://cache.numtide.com
             extra-trusted-public-keys = ${{ env.CACHE_TRUSTED_PUBLIC_KEYS }} nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs= niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
 
-      - uses: oven-sh/setup-bun@v2
-
       - env:
           FLAKE_REF: ./${{ env.FLAKE_CHECKOUT_PATH }}
           HOST_JSON: ${{ toJSON(matrix) }}
           PACKAGE_EXPORT_PATH: package-export/${{ matrix.matrixKey }}.json
-        run: bun run scripts/export-packages.ts
+        run: ./scripts/export-packages.ts
 
       - uses: actions/upload-artifact@v7
         with:
@@ -135,8 +131,6 @@ jobs:
       matrix: ${{ steps.plan.outputs.matrix }}
     steps:
       - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
-
       - uses: actions/download-artifact@v8
         with:
           pattern: package-export-*
@@ -149,7 +143,7 @@ jobs:
           CACHE_URLS: ${{ env.CACHE_URLS }}
           CACHIX_NAME: ${{ vars.CACHIX_NAME }}
           CACHE_PROBE_CONCURRENCY: ${{ env.CACHE_PROBE_CONCURRENCY }}
-        run: bun run scripts/plan-builds.ts
+        run: ./scripts/plan-builds.ts
 
   build-packages:
     needs: plan-builds
