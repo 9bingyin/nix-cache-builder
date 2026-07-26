@@ -131,6 +131,10 @@ jobs:
       matrix: ${{ steps.plan.outputs.matrix }}
     steps:
       - uses: actions/checkout@v7
+
+      # plan-builds 通过 Nix shebang 获取 Bun，独立 job 也必须先安装 Nix。
+      - uses: cachix/install-nix-action@v31
+
       - uses: actions/download-artifact@v8
         with:
           pattern: package-export-*
