@@ -191,8 +191,6 @@ jobs:
             extra-trusted-public-keys = ${{ env.CACHE_TRUSTED_PUBLIC_KEYS }} ${{ matrix.extraTrustedPublicKeys }}
 
       - env:
-          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          CACHIX_NAME: ${{ vars.CACHIX_NAME }}
           PACKAGE_ATTR_JSON: ${{ matrix.packageAttrJson }}
           FLAKE_ATTR: ${{ matrix.flakeAttr }}
           HOST_SYSTEM: ${{ matrix.system }}
@@ -201,7 +199,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          nix profile install nixpkgs#cachix nixpkgs#niks3
+          nix profile install nixpkgs#niks3
           export PATH="$HOME/.nix-profile/bin:$PATH"
 
           # GitHub OIDC token 的有效期较短；niks3 会按需重读此文件，因此在构建期间定期刷新。
@@ -245,7 +243,6 @@ jobs:
             --skip-cached
             --no-nom
             --no-link
-            --cachix-cache "${CACHIX_NAME}"
             --niks3-server "${NIKS3_SERVER}"
           )
 

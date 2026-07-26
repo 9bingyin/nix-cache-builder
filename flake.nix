@@ -1,5 +1,5 @@
 {
-  description = "Build remote Nix host configurations and publish them to Cachix and niks3";
+  description = "Build remote Nix host configurations and publish them to niks3";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -62,7 +62,6 @@
         default = pkgs.mkShell {
           packages = with pkgs; [
             bun
-            cachix
             nixfmt
           ];
         };
