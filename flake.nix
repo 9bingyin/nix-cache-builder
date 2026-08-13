@@ -49,13 +49,6 @@
         formatting = treefmtEval.${system}.config.build.check self;
       });
 
-      apps = forAllSystems (pkgs: {
-        nix-fast-build = {
-          type = "app";
-          program = "${pkgs.nix-fast-build}/bin/nix-fast-build";
-        };
-      });
-
       legacyPackages = forAllSystems (pkgs: pkgs);
 
       devShells = forAllSystems (pkgs: {

@@ -37,16 +37,15 @@ env:
     experimental-features = nix-command flakes
     accept-flake-config = true
   NIXPKGS_ALLOW_UNFREE: "1"
-  # Cachix 与 niks3 都用于下载和构建前的缓存探测。
-  CACHE_URLS: https://${{ vars.CACHIX_NAME }}.cachix.org https://cache.bingyin.org
-  CACHE_TRUSTED_PUBLIC_KEYS: 9bingyin.cachix.org-1:uXB+kYLEeHo6kpX8NIZtRwwPozYR/JRNRMeFaObkvDo= cache.bingyin.org-1:PU5qCuJfhYPKSIRdOMCndVB6Dn9rRRIRVZAnG2uAPSI=
+  # niks3 缓存用于下载和构建前的缓存探测。
+  CACHE_URLS: https://cache.bingyin.org
+  CACHE_TRUSTED_PUBLIC_KEYS: cache.bingyin.org-1:PU5qCuJfhYPKSIRdOMCndVB6Dn9rRRIRVZAnG2uAPSI=
   NIKS3_SERVER: https://niks3.bingyin.org
   # 查缓存 HTTP 并发；matrix 任务并行见各 job 的 max-parallel
   CACHE_PROBE_CONCURRENCY: "8"
 
 jobs:
   discover-hosts:
-    if: ${{ vars.CACHIX_NAME != '' }}
     runs-on: ubuntu-latest
     outputs:
       has_hosts: ${{ steps.discover.outputs.has_hosts }}
@@ -65,8 +64,8 @@ jobs:
         with:
           github_access_token: ${{ secrets.FLAKE_REPO_TOKEN }}
           extra_nix_config: |
-            extra-substituters = ${{ env.CACHE_URLS }} https://nix-community.cachix.org https://cache.numtide.com
-            extra-trusted-public-keys = ${{ env.CACHE_TRUSTED_PUBLIC_KEYS }} nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs= niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
+            extra-substituters = ${{ env.CACHE_URLS }} https://cache.numtide.com
+            extra-trusted-public-keys = ${{ env.CACHE_TRUSTED_PUBLIC_KEYS }} niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
 
       - id: discover
         env:
@@ -108,8 +107,8 @@ jobs:
         with:
           github_access_token: ${{ secrets.FLAKE_REPO_TOKEN }}
           extra_nix_config: |
-            extra-substituters = ${{ env.CACHE_URLS }} https://nix-community.cachix.org https://cache.numtide.com
-            extra-trusted-public-keys = ${{ env.CACHE_TRUSTED_PUBLIC_KEYS }} nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs= niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
+            extra-substituters = ${{ env.CACHE_URLS }} https://cache.numtide.com
+            extra-trusted-public-keys = ${{ env.CACHE_TRUSTED_PUBLIC_KEYS }} niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
 
       - env:
           FLAKE_REF: ./${{ env.FLAKE_CHECKOUT_PATH }}
@@ -145,7 +144,6 @@ jobs:
         env:
           PACKAGE_EXPORT_DIR: package-exports
           CACHE_URLS: ${{ env.CACHE_URLS }}
-          CACHIX_NAME: ${{ vars.CACHIX_NAME }}
           CACHE_PROBE_CONCURRENCY: ${{ env.CACHE_PROBE_CONCURRENCY }}
         run: ./scripts/plan-builds.ts
 
@@ -190,8 +188,8 @@ jobs:
 
       - env:
           PACKAGE_ATTR_JSON: ${{ matrix.packageAttrJson }}
+          PACKAGE_STORE_PATH: ${{ matrix.packageStorePath }}
           FLAKE_ATTR: ${{ matrix.flakeAttr }}
-          HOST_SYSTEM: ${{ matrix.system }}
           EXTRA_SUBSTITUTERS: ${{ env.CACHE_URLS }} ${{ matrix.extraSubstituters }}
           EXTRA_TRUSTED_PUBLIC_KEYS: ${{ env.CACHE_TRUSTED_PUBLIC_KEYS }} ${{ matrix.extraTrustedPublicKeys }}
         run: |
@@ -200,55 +198,49 @@ jobs:
           nix profile install nixpkgs#niks3
           export PATH="$HOME/.nix-profile/bin:$PATH"
 
-          # GitHub OIDC token 的有效期较短；niks3 会按需重读此文件，因此在构建期间定期刷新。
+          # niks3 会按需调用此脚本，并在令牌过期前刷新 GitHub OIDC token。
           umask 077
-          token_file="$(mktemp)"
-          refresh_pid=""
-          cleanup() {
-            if [[ -n "$refresh_pid" ]]; then
-              kill "$refresh_pid" 2>/dev/null || true
-            fi
-            rm -f "$token_file" "${token_file}.new"
-          }
-          trap cleanup EXIT
-          refresh_niks3_token() {
-            if ! curl --fail --silent --show-error \
-              -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https%3A%2F%2Fniks3.bingyin.org" \
-              | jq --exit-status --raw-output '.value' >"${token_file}.new"; then
-              rm -f "${token_file}.new"
-              return 1
-            fi
-            mv "${token_file}.new" "$token_file"
-          }
-          refresh_niks3_token
-          (
-            while sleep 180; do
-              until refresh_niks3_token; do
-                echo "warning: failed to refresh niks3 OIDC token; retrying in 15 seconds" >&2
-                sleep 15
-              done
-            done
-          ) &
-          refresh_pid=$!
-          export NIKS3_AUTH_TOKEN_FILE="$token_file"
+          token_script="$(mktemp)"
+          trap 'rm -f "$token_script"' EXIT
+          cat >"$token_script" <<'EOF'
+          #!/bin/sh
+          set -eu
+          curl --fail --silent --show-error \
+            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https%3A%2F%2Fniks3.bingyin.org" \
+            | jq --exit-status '{token: .value, expires_at: ((now + 240) | todateiso8601)}'
+          EOF
+          chmod 700 "$token_script"
 
-          package_selector="$(< scripts/host-packages.nix)"
-          args=(
-            --flake "./${FLAKE_CHECKOUT_PATH}#${FLAKE_ATTR}"
-            --select "host: { ${PACKAGE_ATTR_JSON} = builtins.getAttr ${PACKAGE_ATTR_JSON} ((${package_selector}) host); }"
-            --systems "${HOST_SYSTEM}"
-            --skip-cached
-            --no-nom
+          flake_path="$(cd "${FLAKE_CHECKOUT_PATH}" && pwd -P)"
+          flake_ref="path:${flake_path}"
+          flake_ref_json="$(jq -Rn --arg value "$flake_ref" '$value')"
+          build_expr="let
+            host = (builtins.getFlake ${flake_ref_json}).${FLAKE_ATTR};
+            package = builtins.getAttr ${PACKAGE_ATTR_JSON} (($(< scripts/host-packages.nix)) host);
+          in
+            package"
+
+          build_args=(
+            --impure
+            --expr "$build_expr"
             --no-link
-            --niks3-server "${NIKS3_SERVER}"
+            --print-out-paths
           )
-
           if [[ -n "${EXTRA_SUBSTITUTERS}" ]]; then
-            args+=(--option substituters "${EXTRA_SUBSTITUTERS}")
+            build_args+=(--option substituters "${EXTRA_SUBSTITUTERS}")
           fi
           if [[ -n "${EXTRA_TRUSTED_PUBLIC_KEYS}" ]]; then
-            args+=(--option trusted-public-keys "${EXTRA_TRUSTED_PUBLIC_KEYS}")
+            build_args+=(--option trusted-public-keys "${EXTRA_TRUSTED_PUBLIC_KEYS}")
           fi
 
-          nix run .#nix-fast-build -- "${args[@]}"
+          built_path="$(nix build "${build_args[@]}")"
+          if [[ "$built_path" != "$PACKAGE_STORE_PATH" ]]; then
+            echo "package output changed since planning: expected ${PACKAGE_STORE_PATH}, got ${built_path}" >&2
+            exit 1
+          fi
+
+          niks3 push \
+            --server-url "${NIKS3_SERVER}" \
+            --auth-token-script "$token_script" \
+            "$built_path"

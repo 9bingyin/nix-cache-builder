@@ -8,8 +8,8 @@
  * 汇总各主机导出的包列表，按 storePath 去重，并发探测缓存，产出包级 build matrix。
  *
  * 输入 env:
- *   PACKAGE_EXPORT_DIR, CACHE_URLS? / CACHIX_NAME?, CACHE_PROBE_CONCURRENCY?
- * 探测范围 = CACHE_URLS ∪ 各主机 extraSubstituters ∪ CACHIX_NAME；
+ *   PACKAGE_EXPORT_DIR, CACHE_URLS?, CACHE_PROBE_CONCURRENCY?
+ * 探测范围 = CACHE_URLS ∪ 各主机 extraSubstituters；
  * 命中但不在本机 substituters 中时标记 foreignCache（仍算 cached，不进 build）。
  *
  * 输出 GITHUB_OUTPUT:
@@ -204,13 +204,7 @@ function collectCacheUrls(packages: readonly PackageRecord[]): string[] {
       .filter((url) => url.length > 0),
   );
 
-  const cachixName = Bun.env.CACHIX_NAME;
-  const fromCachix =
-    cachixName === undefined || cachixName.length === 0
-      ? []
-      : [`https://${cachixName}.cachix.org`];
-
-  return unique([...fromEnv, ...fromHosts, ...fromCachix]);
+  return unique([...fromEnv, ...fromHosts]);
 }
 
 async function isPresentInCache(
