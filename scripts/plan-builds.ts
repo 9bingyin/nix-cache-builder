@@ -18,6 +18,7 @@
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { narinfoUrl } from "./lib/cache.ts";
 import {
   type BuildMatrixEntry,
   type HostContext,
@@ -211,7 +212,7 @@ async function isPresentInCache(
   cacheUrl: string,
   storePath: string,
 ): Promise<boolean> {
-  const url = `${cacheUrl.replace(/\/$/, "")}/${storePathHash(storePath)}.narinfo`;
+  const url = narinfoUrl(cacheUrl, storePathHash(storePath));
 
   try {
     const head = await fetch(url, { method: "HEAD" });
