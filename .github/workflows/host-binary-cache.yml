@@ -234,13 +234,25 @@ jobs:
             build_args+=(--option trusted-public-keys "${EXTRA_TRUSTED_PUBLIC_KEYS}")
           fi
 
-          built_path="$(nix build "${build_args[@]}")"
-          if [[ "$built_path" != "$PACKAGE_STORE_PATH" ]]; then
-            echo "package output changed since planning: expected ${PACKAGE_STORE_PATH}, got ${built_path}" >&2
+          built_output="$(nix build "${build_args[@]}")"
+          built_paths=()
+          expected_found=false
+
+          while IFS= read -r path; do
+            [[ -z "$path" ]] && continue
+            built_paths+=("$path")
+            if [[ "$path" == "$PACKAGE_STORE_PATH" ]]; then
+              expected_found=true
+            fi
+          done <<< "$built_output"
+
+          if [[ "$expected_found" != true ]]; then
+            echo "package output changed since planning: expected ${PACKAGE_STORE_PATH}, got:" >&2
+            printf '  %s\n' "${built_paths[@]}" >&2
             exit 1
           fi
 
           niks3 push \
             --server-url "${NIKS3_SERVER}" \
             --auth-token-script "$token_script" \
-            "$built_path"
+            "${built_paths[@]}"
