@@ -225,6 +225,7 @@ jobs:
             --impure
             --expr "$build_expr"
             --no-link
+            --print-build-logs
             --print-out-paths
           )
           if [[ -n "${EXTRA_SUBSTITUTERS}" ]]; then
