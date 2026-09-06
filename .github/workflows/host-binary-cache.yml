@@ -13,13 +13,18 @@ on:
   repository_dispatch:
     types:
       - flake-updated
-  schedule:
-    # 每天 04:00 Asia/Shanghai (UTC+8) = 20:00 UTC
-    - cron: "0 20 * * *"
   workflow_dispatch:
     inputs:
+      repository:
+        description: "配置 GitHub 仓库（owner/repo）"
+        required: true
+        type: string
+      ref:
+        description: "分支、标签或提交；留空使用变量 FLAKE_REF，未设置则使用默认分支"
+        required: false
+        type: string
       hosts:
-        description: "逗号分隔的 configurations 主机名；留空表示全部"
+        description: "逗号分隔的主机名或 root.host；留空构建全部配置顶层"
         required: false
         type: string
 
@@ -31,18 +36,17 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  FLAKE_REPOSITORY: 9bingyin/flake
+  # 自动触发使用仓库变量；手动运行使用输入框。
+  FLAKE_REPOSITORY: ${{ inputs.repository || vars.FLAKE_REPOSITORY }}
+  FLAKE_REF: ${{ inputs.ref || vars.FLAKE_REF }}
   FLAKE_CHECKOUT_PATH: flake-config
   NIX_CONFIG: |
     experimental-features = nix-command flakes
     accept-flake-config = true
   NIXPKGS_ALLOW_UNFREE: "1"
-  # niks3 缓存用于下载和构建前的缓存探测。
   CACHE_URLS: https://cache.bingyin.org
   CACHE_TRUSTED_PUBLIC_KEYS: cache.bingyin.org-1:PU5qCuJfhYPKSIRdOMCndVB6Dn9rRRIRVZAnG2uAPSI=
   NIKS3_SERVER: https://niks3.bingyin.org
-  # 查缓存 HTTP 并发；matrix 任务并行见各 job 的 max-parallel
-  CACHE_PROBE_CONCURRENCY: "8"
 
 jobs:
   discover-hosts:
@@ -50,14 +54,22 @@ jobs:
     outputs:
       has_hosts: ${{ steps.discover.outputs.has_hosts }}
       matrix: ${{ steps.discover.outputs.matrix }}
-      flake_rev: ${{ steps.discover.outputs.flake_rev }}
     steps:
+      - name: Validate configuration repository
+        run: |
+          if [[ ! "$FLAKE_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "::error::请填写 repository（owner/repo）；自动触发需设置仓库变量 FLAKE_REPOSITORY。"
+            exit 1
+          fi
+
       - uses: actions/checkout@v7
 
       - uses: actions/checkout@v7
         with:
           repository: ${{ env.FLAKE_REPOSITORY }}
+          ref: ${{ env.FLAKE_REF }}
           token: ${{ secrets.FLAKE_REPO_TOKEN }}
+          persist-credentials: false
           path: ${{ env.FLAKE_CHECKOUT_PATH }}
 
       - uses: cachix/install-nix-action@v31
@@ -70,26 +82,28 @@ jobs:
       - id: discover
         env:
           FLAKE_REF: ./${{ env.FLAKE_CHECKOUT_PATH }}
-          CONFIG_ROOTS: darwinConfigurations,nixosConfigurations
           HOSTS: ${{ inputs.hosts }}
-          # 不改 flake 时，非默认平台主机可在仓库变量中显式指定，
-          # 例如 {"darwinConfigurations.Legacy-Mac":"x86_64-darwin"}。
+          # 可显式指定期望平台；构建前会校验，例如 {"darwinConfigurations.Mac":"aarch64-darwin"}。
           HOST_SYSTEM_OVERRIDES: ${{ vars.HOST_SYSTEM_OVERRIDES }}
           HOST_RUNNER_OVERRIDES: ${{ vars.HOST_RUNNER_OVERRIDES }}
-          AARCH64_DARWIN_RUNNER: ${{ vars.AARCH64_DARWIN_RUNNER || 'macos-15' }}
-          X86_64_DARWIN_RUNNER: ${{ vars.X86_64_DARWIN_RUNNER || 'macos-15-intel' }}
-          X86_64_LINUX_RUNNER: ${{ vars.X86_64_LINUX_RUNNER || 'ubuntu-24.04' }}
-          AARCH64_LINUX_RUNNER: ${{ vars.AARCH64_LINUX_RUNNER || 'ubuntu-24.04-arm' }}
+          AARCH64_DARWIN_RUNNER: ${{ vars.AARCH64_DARWIN_RUNNER }}
+          X86_64_DARWIN_RUNNER: ${{ vars.X86_64_DARWIN_RUNNER }}
+          X86_64_LINUX_RUNNER: ${{ vars.X86_64_LINUX_RUNNER }}
+          AARCH64_LINUX_RUNNER: ${{ vars.AARCH64_LINUX_RUNNER }}
         run: ./scripts/discover-hosts.ts
 
-  export-packages:
+  build-hosts:
     needs: discover-hosts
+    # 不对 PR 开放共享缓存写入；自动触发与手动触发使用相同的构建流程。
     if: ${{ needs.discover-hosts.outputs.has_hosts == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       fail-fast: false
-      max-parallel: 4 # 最多同时 export 4 台主机
+      max-parallel: 4
       matrix: ${{ fromJSON(needs.discover-hosts.outputs.matrix) }}
-    name: Export ${{ matrix.root }}.${{ matrix.host }}
+    name: Build ${{ matrix.root }}.${{ matrix.host }} (${{ matrix.expectedSystem }})
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
@@ -98,11 +112,10 @@ jobs:
         with:
           repository: ${{ env.FLAKE_REPOSITORY }}
           token: ${{ secrets.FLAKE_REPO_TOKEN }}
+          persist-credentials: false
           path: ${{ env.FLAKE_CHECKOUT_PATH }}
           ref: ${{ matrix.flakeRev }}
 
-      # 此时只知道主机名称和目标平台；nix.package 与主机缓存设置在原生
-      # runner 完整求值配置后由 export-packages 导出，故 bootstrap 统一使用 Nix。
       - uses: cachix/install-nix-action@v31
         with:
           github_access_token: ${{ secrets.FLAKE_REPO_TOKEN }}
@@ -110,150 +123,28 @@ jobs:
             extra-substituters = ${{ env.CACHE_URLS }} https://cache.numtide.com
             extra-trusted-public-keys = ${{ env.CACHE_TRUSTED_PUBLIC_KEYS }} niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
 
-      - env:
+      - id: host
+        env:
           FLAKE_REF: ./${{ env.FLAKE_CHECKOUT_PATH }}
           HOST_JSON: ${{ toJSON(matrix) }}
-          PACKAGE_EXPORT_PATH: package-export/${{ matrix.matrixKey }}.json
-        run: ./scripts/export-packages.ts
+        run: ./scripts/prepare-host.ts
 
-      - uses: actions/upload-artifact@v7
-        with:
-          name: package-export-${{ matrix.matrixKey }}
-          path: package-export/${{ matrix.matrixKey }}.json
-          if-no-files-found: error
-
-  plan-builds:
-    needs: export-packages
-    runs-on: ubuntu-latest
-    outputs:
-      has_builds: ${{ steps.plan.outputs.has_builds }}
-      matrix: ${{ steps.plan.outputs.matrix }}
-    steps:
-      - uses: actions/checkout@v7
-
-      # plan-builds 通过 Nix shebang 获取 Bun，独立 job 也必须先安装 Nix。
-      - uses: cachix/install-nix-action@v31
-
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: package-export-*
-          path: package-exports
-          merge-multiple: true
-
-      - id: plan
+      - name: Build configuration toplevel
         env:
-          PACKAGE_EXPORT_DIR: package-exports
-          CACHE_URLS: ${{ env.CACHE_URLS }}
-          CACHE_PROBE_CONCURRENCY: ${{ env.CACHE_PROBE_CONCURRENCY }}
-        run: ./scripts/plan-builds.ts
-
-  build-packages:
-    needs: plan-builds
-    # niks3 的 OIDC token 可写入共享缓存，仅允许受信任的触发事件获取。
-    if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.plan-builds.outputs.has_builds == 'true' }}
-    permissions:
-      contents: read
-      id-token: write
-    strategy:
-      fail-fast: false
-      max-parallel: 4 # 最多同时 build 4 个包
-      matrix: ${{ fromJSON(needs.plan-builds.outputs.matrix) }}
-    name: Build ${{ matrix.packageName }} (${{ matrix.system }})
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/checkout@v7
-        with:
-          repository: ${{ env.FLAKE_REPOSITORY }}
-          token: ${{ secrets.FLAKE_REPO_TOKEN }}
-          path: ${{ env.FLAKE_CHECKOUT_PATH }}
-          ref: ${{ matrix.flakeRev }}
-
-      - if: ${{ matrix.installer == 'lix' }}
-        uses: canidae-solutions/lix-quick-install-action@v4
-        with:
-          github_access_token: ${{ secrets.FLAKE_REPO_TOKEN }}
-          lix_conf: |
-            extra-substituters = ${{ env.CACHE_URLS }} ${{ matrix.extraSubstituters }}
-            extra-trusted-public-keys = ${{ env.CACHE_TRUSTED_PUBLIC_KEYS }} ${{ matrix.extraTrustedPublicKeys }}
-
-      - if: ${{ matrix.installer == 'nix' }}
-        uses: cachix/install-nix-action@v31
-        with:
-          github_access_token: ${{ secrets.FLAKE_REPO_TOKEN }}
-          extra_nix_config: |
-            extra-substituters = ${{ env.CACHE_URLS }} ${{ matrix.extraSubstituters }}
-            extra-trusted-public-keys = ${{ env.CACHE_TRUSTED_PUBLIC_KEYS }} ${{ matrix.extraTrustedPublicKeys }}
-
-      - env:
-          PACKAGE_ATTR_JSON: ${{ matrix.packageAttrJson }}
-          PACKAGE_STORE_PATH: ${{ matrix.packageStorePath }}
-          FLAKE_ATTR: ${{ matrix.flakeAttr }}
-          EXTRA_SUBSTITUTERS: ${{ env.CACHE_URLS }} ${{ matrix.extraSubstituters }}
-          EXTRA_TRUSTED_PUBLIC_KEYS: ${{ env.CACHE_TRUSTED_PUBLIC_KEYS }} ${{ matrix.extraTrustedPublicKeys }}
+          INSTALLABLE: ${{ steps.host.outputs.installable }}
+          EXTRA_SUBSTITUTERS: ${{ env.CACHE_URLS }} ${{ steps.host.outputs.extra_substituters }}
+          EXTRA_TRUSTED_PUBLIC_KEYS: ${{ env.CACHE_TRUSTED_PUBLIC_KEYS }} ${{ steps.host.outputs.extra_trusted_public_keys }}
         run: |
           set -euo pipefail
+          # 保留 GC root，直到下一步完成闭包上传。
+          nix build "$INSTALLABLE" \
+            --impure --no-write-lock-file \
+            --out-link "$RUNNER_TEMP/host-result" \
+            --print-build-logs --print-out-paths \
+            --option extra-substituters "$EXTRA_SUBSTITUTERS" \
+            --option extra-trusted-public-keys "$EXTRA_TRUSTED_PUBLIC_KEYS" \
+            > "$RUNNER_TEMP/host-paths"
+          test -s "$RUNNER_TEMP/host-paths"
 
-          nix profile install nixpkgs#niks3
-          export PATH="$HOME/.nix-profile/bin:$PATH"
-
-          # niks3 会按需调用此脚本，并在令牌过期前刷新 GitHub OIDC token。
-          umask 077
-          token_script="$(mktemp)"
-          trap 'rm -f "$token_script"' EXIT
-          cat >"$token_script" <<'EOF'
-          #!/bin/sh
-          set -eu
-          curl --fail --silent --show-error \
-            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https%3A%2F%2Fniks3.bingyin.org" \
-            | jq --exit-status '{token: .value, expires_at: ((now + 240) | todateiso8601)}'
-          EOF
-          chmod 700 "$token_script"
-
-          flake_path="$(cd "${FLAKE_CHECKOUT_PATH}" && pwd -P)"
-          flake_ref="path:${flake_path}"
-          flake_ref_json="$(jq -Rn --arg value "$flake_ref" '$value')"
-          build_expr="let
-            host = (builtins.getFlake ${flake_ref_json}).${FLAKE_ATTR};
-            package = builtins.getAttr ${PACKAGE_ATTR_JSON} (($(< scripts/host-packages.nix)) host);
-          in
-            package"
-
-          build_args=(
-            --impure
-            --expr "$build_expr"
-            --no-link
-            --print-build-logs
-            --print-out-paths
-          )
-          if [[ -n "${EXTRA_SUBSTITUTERS}" ]]; then
-            build_args+=(--option substituters "${EXTRA_SUBSTITUTERS}")
-          fi
-          if [[ -n "${EXTRA_TRUSTED_PUBLIC_KEYS}" ]]; then
-            build_args+=(--option trusted-public-keys "${EXTRA_TRUSTED_PUBLIC_KEYS}")
-          fi
-
-          built_output="$(nix build "${build_args[@]}")"
-          built_paths=()
-          expected_found=false
-
-          while IFS= read -r path; do
-            [[ -z "$path" ]] && continue
-            built_paths+=("$path")
-            if [[ "$path" == "$PACKAGE_STORE_PATH" ]]; then
-              expected_found=true
-            fi
-          done <<< "$built_output"
-
-          if [[ "$expected_found" != true ]]; then
-            echo "package output changed since planning: expected ${PACKAGE_STORE_PATH}, got:" >&2
-            printf '  %s\n' "${built_paths[@]}" >&2
-            exit 1
-          fi
-
-          niks3 push \
-            --server-url "${NIKS3_SERVER}" \
-            --auth-token-script "$token_script" \
-            "${built_paths[@]}"
+      - name: Cache configuration closure
+        run: ./scripts/cache-host.sh
