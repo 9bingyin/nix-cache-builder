@@ -1,15 +1,6 @@
 name: Host Binary Cache
 
 on:
-  push:
-    branches:
-      - main
-      - master
-    paths:
-      - "flake.lock"
-      - "flake.nix"
-      - "scripts/**"
-      - ".github/workflows/host-binary-cache.yml"
   repository_dispatch:
     types:
       - flake-updated
@@ -31,15 +22,18 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 concurrency:
   group: host-binary-cache-${{ github.ref }}
   cancel-in-progress: false
 
 env:
-  # 自动触发使用仓库变量；手动运行使用输入框。
   FLAKE_REPOSITORY: ${{ inputs.repository || vars.FLAKE_REPOSITORY }}
   FLAKE_REF: ${{ inputs.ref || vars.FLAKE_REF }}
-  FLAKE_CHECKOUT_PATH: flake-config
+  FLAKE_PATH: flake-config
   NIX_CONFIG: |
     experimental-features = nix-command flakes
     accept-flake-config = true
@@ -52,7 +46,6 @@ jobs:
   discover-hosts:
     runs-on: ubuntu-latest
     outputs:
-      has_hosts: ${{ steps.discover.outputs.has_hosts }}
       matrix: ${{ steps.discover.outputs.matrix }}
     steps:
       - name: Validate configuration repository
@@ -70,32 +63,29 @@ jobs:
           ref: ${{ env.FLAKE_REF }}
           token: ${{ secrets.FLAKE_REPO_TOKEN }}
           persist-credentials: false
-          path: ${{ env.FLAKE_CHECKOUT_PATH }}
+          path: ${{ env.FLAKE_PATH }}
 
       - uses: cachix/install-nix-action@v31
         with:
           github_access_token: ${{ secrets.FLAKE_REPO_TOKEN }}
           extra_nix_config: |
-            extra-substituters = ${{ env.CACHE_URLS }} https://cache.numtide.com
+            extra-substituters = ${{ env.CACHE_URLS }} https://cache.numtide.com?priority=41
             extra-trusted-public-keys = ${{ env.CACHE_TRUSTED_PUBLIC_KEYS }} niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
 
       - id: discover
+        name: Evaluate and deduplicate configuration toplevels
         env:
-          FLAKE_REF: ./${{ env.FLAKE_CHECKOUT_PATH }}
           HOSTS: ${{ inputs.hosts }}
-          # 可显式指定期望平台；构建前会校验，例如 {"darwinConfigurations.Mac":"aarch64-darwin"}。
           HOST_SYSTEM_OVERRIDES: ${{ vars.HOST_SYSTEM_OVERRIDES }}
           HOST_RUNNER_OVERRIDES: ${{ vars.HOST_RUNNER_OVERRIDES }}
           AARCH64_DARWIN_RUNNER: ${{ vars.AARCH64_DARWIN_RUNNER }}
           X86_64_DARWIN_RUNNER: ${{ vars.X86_64_DARWIN_RUNNER }}
           X86_64_LINUX_RUNNER: ${{ vars.X86_64_LINUX_RUNNER }}
           AARCH64_LINUX_RUNNER: ${{ vars.AARCH64_LINUX_RUNNER }}
-        run: ./scripts/discover-hosts.ts
+        run: ./scripts/ci.sh discover
 
   build-hosts:
     needs: discover-hosts
-    # 不对 PR 开放共享缓存写入；自动触发与手动触发使用相同的构建流程。
-    if: ${{ needs.discover-hosts.outputs.has_hosts == 'true' }}
     permissions:
       contents: read
       id-token: write
@@ -113,38 +103,32 @@ jobs:
           repository: ${{ env.FLAKE_REPOSITORY }}
           token: ${{ secrets.FLAKE_REPO_TOKEN }}
           persist-credentials: false
-          path: ${{ env.FLAKE_CHECKOUT_PATH }}
+          path: ${{ env.FLAKE_PATH }}
           ref: ${{ matrix.flakeRev }}
 
       - uses: cachix/install-nix-action@v31
         with:
           github_access_token: ${{ secrets.FLAKE_REPO_TOKEN }}
           extra_nix_config: |
-            extra-substituters = ${{ env.CACHE_URLS }} https://cache.numtide.com
+            extra-substituters = ${{ env.CACHE_URLS }} https://cache.numtide.com?priority=41
             extra-trusted-public-keys = ${{ env.CACHE_TRUSTED_PUBLIC_KEYS }} niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
 
+      - name: Configure automatic cache uploads
+        uses: Mic92/niks3-action@v1
+        with:
+          server-url: ${{ env.NIKS3_SERVER }}
+          substituter: ${{ env.CACHE_URLS }}
+          drain-timeout: "3600"
+
       - id: host
+        name: Verify native derivation and read cache settings
         env:
-          FLAKE_REF: ./${{ env.FLAKE_CHECKOUT_PATH }}
           HOST_JSON: ${{ toJSON(matrix) }}
-        run: ./scripts/prepare-host.ts
+        run: ./scripts/ci.sh prepare
 
-      - name: Build configuration toplevel
+      - name: Build verified derivation and queue toplevel closure
         env:
-          INSTALLABLE: ${{ steps.host.outputs.installable }}
-          EXTRA_SUBSTITUTERS: ${{ env.CACHE_URLS }} ${{ steps.host.outputs.extra_substituters }}
-          EXTRA_TRUSTED_PUBLIC_KEYS: ${{ env.CACHE_TRUSTED_PUBLIC_KEYS }} ${{ steps.host.outputs.extra_trusted_public_keys }}
-        run: |
-          set -euo pipefail
-          # 保留 GC root，直到下一步完成闭包上传。
-          nix build "$INSTALLABLE" \
-            --impure --no-write-lock-file \
-            --out-link "$RUNNER_TEMP/host-result" \
-            --print-build-logs --print-out-paths \
-            --option extra-substituters "$EXTRA_SUBSTITUTERS" \
-            --option extra-trusted-public-keys "$EXTRA_TRUSTED_PUBLIC_KEYS" \
-            > "$RUNNER_TEMP/host-paths"
-          test -s "$RUNNER_TEMP/host-paths"
-
-      - name: Cache configuration closure
-        run: ./scripts/cache-host.sh
+          DRV_PATH: ${{ steps.host.outputs.drvPath }}
+          EXTRA_SUBSTITUTERS: ${{ env.CACHE_URLS }} ${{ steps.host.outputs.extraSubstituters }}
+          EXTRA_TRUSTED_PUBLIC_KEYS: ${{ env.CACHE_TRUSTED_PUBLIC_KEYS }} ${{ steps.host.outputs.extraTrustedPublicKeys }}
+        run: ./scripts/ci.sh build

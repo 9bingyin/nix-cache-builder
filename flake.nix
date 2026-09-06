@@ -47,6 +47,20 @@
 
       checks = nixpkgs.lib.genAttrs systems (system: {
         formatting = treefmtEval.${system}.config.build.check self;
+        ci =
+          assert import ./tests/ci.nix;
+          (pkgsFor system).runCommand "ci-checks"
+            {
+              nativeBuildInputs = with pkgsFor system; [
+                actionlint
+                shellcheck
+              ];
+            }
+            ''
+              shellcheck ${./scripts/ci.sh} ${./tests/ci.sh}
+              actionlint ${./.github/workflows/host-binary-cache.yml}
+              touch "$out"
+            '';
       });
 
       legacyPackages = forAllSystems (pkgs: pkgs);
@@ -54,7 +68,9 @@
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
           packages = with pkgs; [
-            bun
+            jq
+            actionlint
+            shellcheck
             nixfmt
           ];
         };

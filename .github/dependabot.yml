@@ -1,16 +1,5 @@
 version: 2
 updates:
-  - package-ecosystem: "bun"
-    directory: "/"
-    schedule:
-      interval: "daily"
-      time: "08:00"
-      timezone: "Asia/Shanghai"
-    groups:
-      bun-dependencies:
-        patterns:
-          - "*"
-
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

@@ -3,11 +3,8 @@ result
 result-*
 .direnv
 
-# Bun / Node
+# Local tool dependencies
 node_modules/
-
-# TypeScript
-*.tsbuildinfo
 
 # OS
 .DS_Store
