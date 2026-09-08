@@ -49,8 +49,6 @@ if !lib.validRoot host.root then
   throw "Unsupported configuration root: ${host.root}"
 else if top.system != host.expectedSystem || top.system != currentSystem then
   throw "Platform mismatch: configuration=${top.system}, expected=${host.expectedSystem}, runner=${currentSystem}"
-else if top.drvPath != host.drvPath then
-  throw "Derivation changed since discovery: expected ${host.drvPath}, got ${top.drvPath}"
 else
   {
     drvPath = lib.setting top.drvPath;

@@ -12,13 +12,15 @@ let
     attrNames
     concatMap
     concatStringsSep
-    elem
     filter
-    foldl'
     length
     map
     ;
   lib = import ./lib.nix;
+  defaultSystems = {
+    darwinConfigurations = "aarch64-darwin";
+    nixosConfigurations = "x86_64-linux";
+  };
   defaultRunners = {
     aarch64-darwin = lib.envOr "AARCH64_DARWIN_RUNNER" "macos-15";
     x86_64-darwin = lib.envOr "X86_64_DARWIN_RUNNER" "macos-15-intel";
@@ -28,66 +30,41 @@ let
   // runners;
   matches = entry: name: name == entry.host || name == "${entry.root}.${entry.host}";
   candidates =
-    concatMap (root: map (host: { inherit root host; }) (attrNames (flake.${root} or { })))
+    concatMap
+      (
+        root:
+        map (
+          host:
+          let
+            key = "${root}.${host}";
+          in
+          {
+            inherit root host;
+            expectedSystem = systemOverrides.${key} or (systemOverrides.${host} or defaultSystems.${root});
+          }
+        ) (attrNames (flake.${root} or { }))
+      )
       [
         "darwinConfigurations"
         "nixosConfigurations"
       ];
   selected = filter (entry: hosts == [ ] || builtins.any (matches entry) hosts) candidates;
   missing = filter (name: !builtins.any (entry: matches entry name) selected) hosts;
-  # 让别名和原名共享一次求值；不再为每个配置启动独立 Nix 进程。
-  evaluated = map (
+  include = map (
     entry:
     let
-      inherit (entry) root host;
-      key = "${root}.${host}";
-      top = flake.${root}.${host}.config.system.build.toplevel;
-      expectedSystem = systemOverrides.${key} or (systemOverrides.${host} or top.system);
+      key = "${entry.root}.${entry.host}";
       runner =
-        runnerOverrides.${key} or (runnerOverrides.${host}
-          or (defaultRunners.${expectedSystem} or (throw "Unsupported system ${expectedSystem} for ${key}"))
+        runnerOverrides.${key} or (runnerOverrides.${entry.host} or (defaultRunners.${entry.expectedSystem}
+          or (throw "Unsupported system ${entry.expectedSystem} for ${key}")
+        )
         );
     in
-    {
-      inherit
-        root
-        host
-        expectedSystem
-        runner
-        flakeRev
-        ;
-      inherit (top) drvPath;
+    entry
+    // {
+      inherit runner flakeRev;
     }
   ) selected;
-  ordered =
-    filter (entry: entry.host != "default") evaluated
-    ++ filter (entry: entry.host == "default") evaluated;
-  deduplicated =
-    foldl'
-      (
-        acc: entry:
-        # attrset 的键不能携带 store 上下文；只清除索引键，保留输出 drvPath 的上下文。
-        let
-          drvKey = builtins.unsafeDiscardStringContext entry.drvPath;
-        in
-        if acc.seen ? ${drvKey} then
-          acc // { aliases = acc.aliases ++ [ "${entry.root}.${entry.host} → ${acc.seen.${drvKey}}" ]; }
-        else
-          {
-            seen = acc.seen // {
-              ${drvKey} = "${entry.root}.${entry.host}";
-            };
-            include = acc.include ++ [ entry ];
-            inherit (acc) aliases;
-          }
-      )
-      {
-        seen = { };
-        include = [ ];
-        aliases = [ ];
-      }
-      ordered;
-  inherit (deduplicated) include aliases;
 in
 if missing != [ ] then
   throw "No host matched HOSTS entries: ${concatStringsSep "," missing}"
@@ -98,12 +75,14 @@ else if length include > 256 then
 else
   {
     matrix = { inherit include; };
-    inherit aliases;
     summary = concatStringsSep "\n" (
       [
         "## Configuration builds"
         ""
         "Revision: `${flakeRev}`"
+        ""
+        "Discovery only reads configuration names. Each toplevel is evaluated on its target runner."
+        "Routing defaults to aarch64-darwin for Darwin and x86_64-linux for NixOS; use HOST_SYSTEM_OVERRIDES for exceptions."
         ""
         "| Configuration | System | Runner |"
         "| --- | --- | --- |"
@@ -111,16 +90,5 @@ else
       ++ map (
         entry: "| ${entry.root}.${entry.host} | ${entry.expectedSystem} | ${entry.runner} |"
       ) include
-      ++ (
-        if aliases == [ ] then
-          [ ]
-        else
-          [
-            ""
-            "### Deduplicated aliases"
-            ""
-          ]
-          ++ map (alias: "- ${alias}") aliases
-      )
     );
   }

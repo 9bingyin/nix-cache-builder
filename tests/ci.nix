@@ -48,6 +48,11 @@ let
     inherit flake host;
     currentSystem = system;
   };
+  findHost =
+    root: name:
+    builtins.head (
+      builtins.filter (entry: entry.root == root && entry.host == name) result.matrix.include
+    );
   fails = value: !(builtins.tryEval (builtins.deepSeq value true)).success;
   tests = {
     filters =
@@ -56,9 +61,22 @@ let
         "darwinConfigurations.default"
         "linux"
       ];
-    deduplicatesDerivationsNotHostnames = builtins.length result.matrix.include == 4;
-    defaultAlias = builtins.elem "darwinConfigurations.default → darwinConfigurations.workstation" result.aliases;
-    arbitraryAlias = builtins.elem "darwinConfigurations.z-alias → darwinConfigurations.workstation" result.aliases;
+    discoversAllConfigurationNames = builtins.length result.matrix.include == 6;
+    shallowDiscovery =
+      let
+        lazy = discover (
+          args
+          // {
+            flake = {
+              darwinConfigurations.unforced = throw "Configuration was forced during discovery";
+            };
+          }
+        );
+      in
+      builtins.deepSeq lazy ((builtins.head lazy.matrix.include).host == "unforced");
+    defaultDarwinSystem =
+      (findHost "darwinConfigurations" "workstation").expectedSystem == "aarch64-darwin";
+    defaultLinuxSystem = (findHost "nixosConfigurations" "linux").expectedSystem == "x86_64-linux";
     explicitDefault =
       (builtins.head (discover (args // { hosts = [ "default" ]; })).matrix.include).host == "default";
     qualifiedSelection =
@@ -71,7 +89,7 @@ let
               "default"
             ];
           }
-        )).matrix.include == 1;
+        )).matrix.include == 2;
     missingFilter = fails (
       discover (
         args
@@ -118,14 +136,7 @@ let
       inherit flake host;
       currentSystem = "x86_64-linux";
     });
-    changedDerivation = fails (prepare {
-      inherit flake;
-      host = host // {
-        drvPath = "/nix/store/changed.drv";
-      };
-      currentSystem = system;
-    });
-    confirmedDerivation = prepared.drvPath == host.drvPath;
+    evaluatesDerivationOnTargetRunner = prepared.drvPath == "/nix/store/shared.drv";
     cachePriorityAndFiltering =
       prepared.extraSubstituters
       == "https://cache.numtide.com?priority=41 https://cache.numtide.com?trusted=1&priority=41 https://cache.example.org";
@@ -137,7 +148,7 @@ let
           darwinConfigurations.workstation.config = {
             system.build.toplevel = {
               inherit system;
-              drvPath = host.drvPath;
+              drvPath = "/nix/store/managed.drv";
             };
             nix = {
               enable = false;
@@ -158,8 +169,11 @@ let
           currentSystem = system;
         };
       in
-      value.extraSubstituters == "https://cache.numtide.com?priority=41"
-      && value.extraTrustedPublicKeys == "example:key";
+      builtins.deepSeq value (
+        value.drvPath == "/nix/store/managed.drv"
+        && value.extraSubstituters == "https://cache.numtide.com?priority=41"
+        && value.extraTrustedPublicKeys == "example:key"
+      );
     matrixLimit = fails (
       discover (
         args

@@ -73,7 +73,7 @@ jobs:
             extra-trusted-public-keys = ${{ env.CACHE_TRUSTED_PUBLIC_KEYS }} niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
 
       - id: discover
-        name: Evaluate and deduplicate configuration toplevels
+        name: Discover configuration names and target runners
         env:
           HOSTS: ${{ inputs.hosts }}
           HOST_SYSTEM_OVERRIDES: ${{ vars.HOST_SYSTEM_OVERRIDES }}
@@ -121,7 +121,7 @@ jobs:
           drain-timeout: "3600"
 
       - id: host
-        name: Verify native derivation and read cache settings
+        name: Evaluate native derivation and read cache settings
         env:
           HOST_JSON: ${{ toJSON(matrix) }}
         run: ./scripts/ci.sh prepare

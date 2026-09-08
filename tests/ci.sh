@@ -49,11 +49,15 @@ git -C "$FLAKE_PATH" init -q
 git -C "$FLAKE_PATH" add flake.nix
 git -C "$FLAKE_PATH" -c user.name=Test -c user.email=test@example.org -c commit.gpgsign=false commit -qm fixture
 
+current_system="$(nix eval --raw --impure --expr builtins.currentSystem)"
+HOST_SYSTEM_OVERRIDES="$(jq -cn --arg system "$current_system" '{default:$system,native:$system,"z-alias":$system}')"
+export HOST_SYSTEM_OVERRIDES
+
 nix eval --json --file "$repo/tests/ci.nix" | jq -e '. == true'
 "$repo/scripts/ci.sh" discover > "$tmp/discovered.json"
-jq -e '.matrix.include | length == 1' "$tmp/discovered.json"
-jq -e '.matrix.include[0].host == "native" and (.aliases | length == 2)' "$tmp/discovered.json"
-grep -q 'default → darwinConfigurations.native' "$GITHUB_STEP_SUMMARY"
+jq -e '.matrix.include | length == 3' "$tmp/discovered.json"
+jq -e '.matrix.include[0].host == "default" and .matrix.include[1].host == "native" and .matrix.include[2].host == "z-alias"' "$tmp/discovered.json"
+grep -q 'Each toplevel is evaluated on its target runner' "$GITHUB_STEP_SUMMARY"
 export HOST_JSON
 HOST_JSON="$(jq -c '.matrix.include[0]' "$tmp/discovered.json")"
 "$repo/scripts/ci.sh" prepare > "$tmp/prepared.json"
@@ -70,12 +74,6 @@ grep -Fxq "$result" "$tmp/queued-paths"
 "$repo/scripts/ci.sh" build
 grep -Fxq "$result" "$tmp/queued-paths"
 
-if HOST_JSON="$(jq -c '.matrix.include[0] + {drvPath:"/nix/store/wrong.drv"}' "$tmp/discovered.json")" \
-  "$repo/scripts/ci.sh" prepare > "$tmp/error" 2>&1; then
-  echo "Expected drvPath mismatch to fail" >&2
-  exit 1
-fi
-grep -q 'Derivation changed since discovery' "$tmp/error"
 if HOSTS=missing "$repo/scripts/ci.sh" discover > "$tmp/error" 2>&1; then
   echo "Expected unknown host to fail" >&2
   exit 1
