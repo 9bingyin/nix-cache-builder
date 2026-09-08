@@ -1,7 +1,7 @@
 {
   flakePath ? "",
-  flake ? builtins.getFlake "path:${flakePath}",
   flakeRev ? "",
+  flake ? builtins.getFlake "git+file://${flakePath}?rev=${flakeRev}",
   hosts ? (import ./lib.nix).hostFilters (builtins.getEnv "HOSTS"),
   systemOverrides ? (import ./lib.nix).stringMap (builtins.getEnv "HOST_SYSTEM_OVERRIDES"),
   runnerOverrides ? (import ./lib.nix).stringMap (builtins.getEnv "HOST_RUNNER_OVERRIDES"),
@@ -40,6 +40,7 @@ let
           in
           {
             inherit root host;
+            artifactId = builtins.substring 0 16 (builtins.hashString "sha256" key);
             expectedSystem = systemOverrides.${key} or (systemOverrides.${host} or defaultSystems.${root});
           }
         ) (attrNames (flake.${root} or { }))

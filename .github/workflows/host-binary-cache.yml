@@ -84,7 +84,7 @@ jobs:
           AARCH64_LINUX_RUNNER: ${{ vars.AARCH64_LINUX_RUNNER }}
         run: ./scripts/ci.sh discover
 
-  build-hosts:
+  evaluate-hosts:
     needs: discover-hosts
     permissions:
       contents: read
@@ -93,6 +93,81 @@ jobs:
       fail-fast: false
       max-parallel: 4
       matrix: ${{ fromJSON(needs.discover-hosts.outputs.matrix) }}
+    name: Evaluate ${{ matrix.root }}.${{ matrix.host }} (${{ matrix.expectedSystem }})
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ env.FLAKE_REPOSITORY }}
+          token: ${{ secrets.FLAKE_REPO_TOKEN }}
+          persist-credentials: false
+          path: ${{ env.FLAKE_PATH }}
+          ref: ${{ matrix.flakeRev }}
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.FLAKE_REPO_TOKEN }}
+          extra_nix_config: |
+            extra-substituters = ${{ env.CACHE_URLS }} https://cache.numtide.com?priority=41
+            extra-trusted-public-keys = ${{ env.CACHE_TRUSTED_PUBLIC_KEYS }} niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
+
+      # 固定到包含 niks3 1.10.1 的 action main 提交。
+      - uses: Mic92/niks3-action@49502f96d1401d600db17dae3006335936572d97
+        with:
+          server-url: ${{ env.NIKS3_SERVER }}
+          substituter: ${{ env.CACHE_URLS }}
+          drain-timeout: "3600"
+
+      - name: Evaluate native derivation
+        env:
+          HOST_JSON: ${{ toJSON(matrix) }}
+          METADATA_PATH: ${{ runner.temp }}/host-metadata/${{ matrix.artifactId }}.json
+        run: ./scripts/ci.sh evaluate
+
+      - name: Upload evaluation metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: evaluated-host-${{ matrix.artifactId }}
+          path: ${{ runner.temp }}/host-metadata/${{ matrix.artifactId }}.json
+          if-no-files-found: error
+          retention-days: 1
+
+  plan-hosts:
+    needs:
+      - discover-hosts
+      - evaluate-hosts
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: evaluated-host-*
+          path: ${{ runner.temp }}/host-metadata
+          merge-multiple: true
+
+      - uses: cachix/install-nix-action@v31
+
+      - id: plan
+        name: Deduplicate evaluated derivations
+        env:
+          HOST_METADATA_DIR: ${{ runner.temp }}/host-metadata
+          EXPECTED_MATRIX_JSON: ${{ needs.discover-hosts.outputs.matrix }}
+        run: ./scripts/ci.sh plan
+
+  build-hosts:
+    needs: plan-hosts
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.plan-hosts.outputs.matrix) }}
     name: Build ${{ matrix.root }}.${{ matrix.host }} (${{ matrix.expectedSystem }})
     runs-on: ${{ matrix.runner }}
     steps:
@@ -113,15 +188,16 @@ jobs:
             extra-substituters = ${{ env.CACHE_URLS }} https://cache.numtide.com?priority=41
             extra-trusted-public-keys = ${{ env.CACHE_TRUSTED_PUBLIC_KEYS }} niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
 
+      # 固定到包含 niks3 1.10.1 的 action main 提交。
       - name: Configure automatic cache uploads
-        uses: Mic92/niks3-action@v1
+        uses: Mic92/niks3-action@49502f96d1401d600db17dae3006335936572d97
         with:
           server-url: ${{ env.NIKS3_SERVER }}
           substituter: ${{ env.CACHE_URLS }}
           drain-timeout: "3600"
 
       - id: host
-        name: Evaluate native derivation and read cache settings
+        name: Verify native derivation and read cache settings
         env:
           HOST_JSON: ${{ toJSON(matrix) }}
         run: ./scripts/ci.sh prepare

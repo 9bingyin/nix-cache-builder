@@ -1,7 +1,7 @@
 {
   flakePath ? "",
-  flake ? builtins.getFlake "path:${flakePath}",
   host ? builtins.fromJSON (builtins.getEnv "HOST_JSON"),
+  flake ? builtins.getFlake "git+file://${flakePath}?rev=${host.flakeRev}",
   currentSystem ? builtins.currentSystem,
 }:
 let
@@ -49,6 +49,8 @@ if !lib.validRoot host.root then
   throw "Unsupported configuration root: ${host.root}"
 else if top.system != host.expectedSystem || top.system != currentSystem then
   throw "Platform mismatch: configuration=${top.system}, expected=${host.expectedSystem}, runner=${currentSystem}"
+else if host ? drvPath && top.drvPath != host.drvPath then
+  throw "Derivation changed since evaluation: expected ${host.drvPath}, got ${top.drvPath}"
 else
   {
     drvPath = lib.setting top.drvPath;
