@@ -114,7 +114,7 @@ jobs:
             extra-trusted-public-keys = ${{ env.CACHE_TRUSTED_PUBLIC_KEYS }} niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
 
       # 固定到包含 niks3 1.10.1 的 action main 提交。
-      - uses: Mic92/niks3-action@49502f96d1401d600db17dae3006335936572d97
+      - uses: Mic92/niks3-action@efcadabf5dd420389f81d10d470e60dbc4571a67
         with:
           server-url: ${{ env.NIKS3_SERVER }}
           substituter: ${{ env.CACHE_URLS }}
@@ -190,7 +190,7 @@ jobs:
 
       # 固定到包含 niks3 1.10.1 的 action main 提交。
       - name: Configure automatic cache uploads
-        uses: Mic92/niks3-action@49502f96d1401d600db17dae3006335936572d97
+        uses: Mic92/niks3-action@efcadabf5dd420389f81d10d470e60dbc4571a67
         with:
           server-url: ${{ env.NIKS3_SERVER }}
           substituter: ${{ env.CACHE_URLS }}
