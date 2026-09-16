@@ -47,6 +47,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.discover.outputs.matrix }}
+      fallbackMatrix: ${{ steps.evaluate.outputs.fallbackMatrix }}
+      fallbackRequired: ${{ steps.evaluate.outputs.fallbackRequired }}
     steps:
       - name: Validate configuration repository
         run: |
@@ -84,16 +86,33 @@ jobs:
           AARCH64_LINUX_RUNNER: ${{ vars.AARCH64_LINUX_RUNNER }}
         run: ./scripts/ci.sh discover
 
+      - id: evaluate
+        name: Evaluate without IFD on Ubuntu
+        env:
+          HOST_MATRIX_JSON: ${{ steps.discover.outputs.matrix }}
+          HOST_METADATA_DIR: ${{ runner.temp }}/host-metadata
+        run: ./scripts/ci.sh evaluate-fast
+
+      - name: Upload fast evaluation metadata
+        if: steps.evaluate.outputs.metadataCount != '0'
+        uses: actions/upload-artifact@v7
+        with:
+          name: evaluated-host-fast
+          path: ${{ runner.temp }}/host-metadata/*.json
+          if-no-files-found: error
+          retention-days: 1
+
   evaluate-hosts:
     needs: discover-hosts
+    if: needs.discover-hosts.outputs.fallbackRequired == 'true'
     permissions:
       contents: read
       id-token: write
     strategy:
       fail-fast: false
       max-parallel: 4
-      matrix: ${{ fromJSON(needs.discover-hosts.outputs.matrix) }}
-    name: Evaluate ${{ matrix.root }}.${{ matrix.host }} (${{ matrix.expectedSystem }})
+      matrix: ${{ fromJSON(needs.discover-hosts.outputs.fallbackMatrix) }}
+    name: Evaluate fallback ${{ matrix.expectedSystem }} (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
@@ -120,17 +139,17 @@ jobs:
           substituter: ${{ env.CACHE_URLS }}
           drain-timeout: "3600"
 
-      - name: Evaluate native derivation
+      - name: Evaluate derivations on native runner
         env:
-          HOST_JSON: ${{ toJSON(matrix) }}
-          METADATA_PATH: ${{ runner.temp }}/host-metadata/${{ matrix.artifactId }}.json
-        run: ./scripts/ci.sh evaluate
+          HOSTS_JSON: ${{ toJSON(matrix.hosts) }}
+          HOST_METADATA_DIR: ${{ runner.temp }}/host-metadata
+        run: ./scripts/ci.sh evaluate-group
 
-      - name: Upload evaluation metadata
+      - name: Upload fallback evaluation metadata
         uses: actions/upload-artifact@v7
         with:
-          name: evaluated-host-${{ matrix.artifactId }}
-          path: ${{ runner.temp }}/host-metadata/${{ matrix.artifactId }}.json
+          name: evaluated-host-fallback-${{ matrix.groupId }}
+          path: ${{ runner.temp }}/host-metadata/*.json
           if-no-files-found: error
           retention-days: 1
 
@@ -138,6 +157,12 @@ jobs:
     needs:
       - discover-hosts
       - evaluate-hosts
+    if: >-
+      ${{
+        always()
+        && needs.discover-hosts.result == 'success'
+        && (needs.evaluate-hosts.result == 'success' || needs.evaluate-hosts.result == 'skipped')
+      }}
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
@@ -161,6 +186,7 @@ jobs:
 
   build-hosts:
     needs: plan-hosts
+    if: ${{ !cancelled() && needs.plan-hosts.result == 'success' }}
     permissions:
       contents: read
       id-token: write

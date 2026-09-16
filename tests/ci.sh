@@ -6,6 +6,7 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 export FLAKE_PATH="$tmp/flake" RUNNER_TEMP="$tmp"
 export HOSTS='' HOST_SYSTEM_OVERRIDES='' HOST_RUNNER_OVERRIDES=''
+export IFD_TEST_NONCE="$$"
 export AARCH64_DARWIN_RUNNER='' X86_64_DARWIN_RUNNER='' X86_64_LINUX_RUNNER='' AARCH64_LINUX_RUNNER=''
 export GITHUB_OUTPUT="$tmp/output" GITHUB_STEP_SUMMARY="$tmp/summary"
 # 最小本地测试使用系统 shell，不下载 nixpkgs 或 Bun。
@@ -23,27 +24,46 @@ chmod +x "$tmp/hook"
 mkdir "$FLAKE_PATH"
 cat > "$FLAKE_PATH/flake.nix" <<'EOF'
 {
-  outputs = { self }: {
-    darwinConfigurations = rec {
-      native.config = {
-        nix.enable = false;
-        nix.settings = throw "Disabled nix.settings accessed";
-        determinateNix = {
-          enable = true;
-          customSettings.extra-substituters = [ "https://cache.numtide.com" ];
+  outputs = { self }:
+    let
+      ifdSystem = import (builtins.derivation {
+        name = "nix-cache-ci-ifd-${builtins.getEnv "IFD_TEST_NONCE"}";
+        system = builtins.currentSystem;
+        builder = "/bin/sh";
+        args = [ "-c" "printf '%s\\n' '\"${builtins.currentSystem}\"' > $out" ];
+      });
+    in
+    {
+      darwinConfigurations = rec {
+        native.config = {
+          nix.enable = false;
+          nix.settings = throw "Disabled nix.settings accessed";
+          determinateNix = {
+            enable = true;
+            customSettings.extra-substituters = [ "https://cache.numtide.com" ];
+          };
+          system.build.toplevel = builtins.derivation {
+            name = "nix-cache-ci-smoke";
+            system = builtins.currentSystem;
+            src = ./payload;
+            builder = "/bin/sh";
+            args = [ "-c" "echo ci-smoke > $out" ];
+          };
         };
-        system.build.toplevel = builtins.derivation {
-          name = "nix-cache-ci-smoke";
-          system = builtins.currentSystem;
-          src = ./payload;
-          builder = "/bin/sh";
-          args = [ "-c" "echo ci-smoke > $out" ];
+        default = native;
+        z-alias = native;
+        ifd.config = {
+          nix.enable = false;
+          system.build.toplevel = builtins.derivation {
+            name = "nix-cache-ci-ifd-result-${builtins.getEnv "IFD_TEST_NONCE"}";
+            system = ifdSystem;
+            src = ./payload;
+            builder = "/bin/sh";
+            args = [ "-c" "echo ifd-smoke > $out" ];
+          };
         };
       };
-      default = native;
-      z-alias = native;
     };
-  };
 }
 EOF
 printf 'source-sensitive\n' > "$FLAKE_PATH/payload"
@@ -52,28 +72,64 @@ git -C "$FLAKE_PATH" add flake.nix payload
 git -C "$FLAKE_PATH" -c user.name=Test -c user.email=test@example.org -c commit.gpgsign=false commit -qm fixture
 
 current_system="$(nix eval --raw --impure --expr builtins.currentSystem)"
-HOST_SYSTEM_OVERRIDES="$(jq -cn --arg system "$current_system" '{default:$system,native:$system,"z-alias":$system}')"
+HOST_SYSTEM_OVERRIDES="$(jq -cn --arg system "$current_system" \
+  '{default:$system,native:$system,"z-alias":$system,ifd:$system}')"
 export HOST_SYSTEM_OVERRIDES
 
 nix eval --json --file "$repo/tests/ci.nix" | jq -e '. == true'
-"$repo/scripts/ci.sh" discover > "$tmp/discovered.json"
+HOSTS='native,default,z-alias' "$repo/scripts/ci.sh" discover > "$tmp/discovered.json"
 jq -e '.matrix.include | length == 3' "$tmp/discovered.json"
 jq -e 'all(.matrix.include[]; (.artifactId | test("^[0-9a-f]{16}$")))' "$tmp/discovered.json"
-grep -q 'Each toplevel is evaluated on its target runner' "$GITHUB_STEP_SUMMARY"
+grep -q 'Ubuntu evaluates each target system without IFD first' "$GITHUB_STEP_SUMMARY"
 
 metadata_dir="$tmp/host-metadata"
-while IFS= read -r host_json; do
-  artifact_id="$(jq -r .artifactId <<< "$host_json")"
-  HOST_JSON="$host_json" METADATA_PATH="$metadata_dir/$artifact_id.json" \
-    "$repo/scripts/ci.sh" evaluate > "$tmp/evaluated-$artifact_id.json"
-  jq -e --arg id "$artifact_id" '.artifactId == $id and (.drvPath | endswith(".drv"))' \
-    "$metadata_dir/$artifact_id.json"
-done < <(jq -c '.matrix.include[]' "$tmp/discovered.json")
+HOST_MATRIX_JSON="$(jq -c .matrix "$tmp/discovered.json")" \
+  HOST_METADATA_DIR="$metadata_dir" \
+  "$repo/scripts/ci.sh" evaluate-fast > "$tmp/fast-evaluation.json"
+jq -e '
+  .fallbackRequired == false
+  and .metadataCount == 3
+  and (.fallbackMatrix.include | length) == 0
+' "$tmp/fast-evaluation.json"
+test "$(find "$metadata_dir" -name '*.json' | wc -l | tr -d ' ')" = 3
+jq -e 'all(.[]; (.drvPath | endswith(".drv")))' \
+  < <(jq -s '.' "$metadata_dir"/*.json)
 
 EXPECTED_MATRIX_JSON="$(jq -c .matrix "$tmp/discovered.json")" \
   HOST_METADATA_DIR="$metadata_dir" "$repo/scripts/ci.sh" plan > "$tmp/planned.json"
 jq -e '(.matrix.include | length) == 1 and (.aliases | length) == 2' "$tmp/planned.json"
 grep -q 'default → darwinConfigurations.native' "$GITHUB_STEP_SUMMARY"
+
+HOSTS='native,ifd' HOST_RUNNER_OVERRIDES='{"ifd":"custom-native"}' \
+  "$repo/scripts/ci.sh" discover > "$tmp/ifd-discovered.json"
+ifd_fast_metadata="$tmp/ifd-fast-metadata"
+HOST_MATRIX_JSON="$(jq -c .matrix "$tmp/ifd-discovered.json")" \
+  HOST_METADATA_DIR="$ifd_fast_metadata" \
+  "$repo/scripts/ci.sh" evaluate-fast \
+  > "$tmp/ifd-routing.json" 2> "$tmp/ifd-fast-error"
+grep -q "allow-import-from-derivation.*disabled" "$tmp/ifd-fast-error"
+jq -e '
+  .fallbackRequired == true
+  and .metadataCount == 0
+  and (.fallbackMatrix.include | length) == 2
+  and all(.fallbackMatrix.include[]; (.hosts | length) == 1)
+' "$tmp/ifd-routing.json"
+test ! -d "$ifd_fast_metadata"
+
+fallback_metadata="$tmp/ifd-fallback-metadata"
+while IFS= read -r fallback_group; do
+  group_id="$(jq -r .groupId <<< "$fallback_group")"
+  HOSTS_JSON="$(jq -c .hosts <<< "$fallback_group")" \
+    HOST_METADATA_DIR="$fallback_metadata" \
+    "$repo/scripts/ci.sh" evaluate-group > "$tmp/ifd-evaluated-$group_id.json"
+done < <(jq -c '.fallbackMatrix.include[]' "$tmp/ifd-routing.json")
+test "$(find "$fallback_metadata" -name '*.json' | wc -l | tr -d ' ')" = 2
+EXPECTED_MATRIX_JSON="$(jq -c .matrix "$tmp/ifd-discovered.json")" \
+  HOST_METADATA_DIR="$fallback_metadata" \
+  "$repo/scripts/ci.sh" plan > "$tmp/ifd-planned.json"
+jq -e '(.matrix.include | length) == 2 and any(.matrix.include[]; .host == "ifd")' \
+  "$tmp/ifd-planned.json"
+
 export HOST_JSON
 HOST_JSON="$(jq -c '.matrix.include[0]' "$tmp/planned.json")"
 "$repo/scripts/ci.sh" prepare > "$tmp/prepared.json"

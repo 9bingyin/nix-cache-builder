@@ -1,5 +1,6 @@
 let
   discover = import ../scripts/discover-hosts.nix;
+  evaluate = import ../scripts/evaluate-hosts.nix;
   plan = import ../scripts/plan-hosts.nix;
   prepare = import ../scripts/prepare-host.nix;
   lib = import ../scripts/lib.nix;
@@ -55,6 +56,14 @@ let
   host = builtins.head selected.matrix.include;
   prepared = prepare {
     inherit flake host;
+    currentSystem = system;
+  };
+  evaluationHosts = builtins.filter (
+    entry: entry.root == "darwinConfigurations"
+  ) result.matrix.include;
+  evaluatedGroup = evaluate {
+    inherit flake;
+    hosts = evaluationHosts;
     currentSystem = system;
   };
   findHost =
@@ -179,6 +188,36 @@ let
       currentSystem = system;
     });
     evaluatesDerivationOnTargetRunner = prepared.drvPath == "/nix/store/shared.drv";
+    evaluatesSystemGroup = builtins.deepSeq evaluatedGroup (
+      builtins.length evaluatedGroup == 5
+      && builtins.all (entry: builtins.match "/nix/store/.*\\.drv" entry.drvPath != null) evaluatedGroup
+    );
+    rejectsEmptyEvaluationGroup = fails (evaluate {
+      inherit flake;
+      hosts = [ ];
+      currentSystem = system;
+    });
+    rejectsMixedEvaluationSystems = fails (evaluate {
+      inherit flake;
+      hosts = [
+        host
+        (host // { expectedSystem = "x86_64-linux"; })
+      ];
+      currentSystem = system;
+    });
+    rejectsMixedEvaluationRevisions = fails (evaluate {
+      inherit flake;
+      hosts = [
+        host
+        (host // { flakeRev = "other-revision"; })
+      ];
+      currentSystem = system;
+    });
+    rejectsWrongEvaluationPlatform = fails (evaluate {
+      inherit flake;
+      hosts = evaluationHosts;
+      currentSystem = "x86_64-linux";
+    });
     cachePriorityAndFiltering =
       prepared.extraSubstituters
       == "https://cache.numtide.com?priority=41 https://cache.numtide.com?trusted=1&priority=41 https://cache.example.org";
